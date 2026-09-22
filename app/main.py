@@ -13,8 +13,9 @@ from app.config import PROJECT_ROOT, get_settings
 from app.inference.gemini import get_provider          # inference layer
 from app.intelligence.agent import Agent                # intelligence layer
 from app.intelligence.memory import SessionStore
+from app.knowledge.ingest import ingest_dir
 from app.knowledge.retrieval import get_store           # knowledge layer
-from app.observability import configure_logging
+from app.observability import configure_logging, log_event
 from app.tools.builtin import build_registry            # tools layer
 
 CLIENT_DIR = PROJECT_ROOT / "client"                    # client layer
@@ -28,6 +29,12 @@ async def lifespan(app: FastAPI):
     store = get_store()
     registry = build_registry(provider, store)
     memory = SessionStore(settings.memory_window_messages)
+
+    # On hosts with an ephemeral filesystem (Render, Cloud Run) the index is
+    # gone after every deploy, so build it on boot if it's empty.
+    if store.count() == 0 and settings.notes_dir.exists():
+        counts = await ingest_dir(settings.notes_dir, store, provider)
+        log_event(event="startup_ingest", docs=len(counts), chunks=store.count())
 
     app.state.provider = provider
     app.state.store = store

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ai-student-assistant
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: GEMINI_API_KEY
+        sync: false          # Render prompts for this on first deploy; never stored in the repo
+      - key: GENERATION_MODEL
+        value: gemini-3.5-flash-lite
