@@ -1,5 +1,14 @@
 # AI_Student_Assistant
 
+[![GitHub repo](https://img.shields.io/badge/GitHub-AI__Student__Assistant-181717?logo=github)](https://github.com/aayushgupta6720-ops/AI_Student_Assistant)
+[![Live on Render](https://img.shields.io/badge/Live-Render-46E3B7?logo=render)](https://ai-student-assistant-hz02.onrender.com)
+
+**Live demo:** https://ai-student-assistant-hz02.onrender.com
+([`/health`](https://ai-student-assistant-hz02.onrender.com/health),
+[`/docs`](https://ai-student-assistant-hz02.onrender.com/docs)) — Render's
+free tier, so the first request after a period of inactivity takes ~30–60 s
+to wake up.
+
 A small, working AI assistant built to show how the **five architectural
 layers** of an AI application fit together: **Client, Intelligence,
 Inference, Knowledge, Tools**. Each layer is its own Python package with a
