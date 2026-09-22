@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Five-Layer Assistant</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+</head>
+<body>
+  <aside id="sidebar">
+    <h1>Five-Layer Assistant</h1>
+    <p class="muted">The client layer. It only speaks HTTP + SSE to <code>/chat</code>.</p>
+
+    <section>
+      <h2>Layers</h2>
+      <ul class="legend">
+        <li><span class="swatch client"></span>Client — this page</li>
+        <li><span class="swatch intelligence"></span>Intelligence — agent loop</li>
+        <li><span class="swatch inference"></span>Inference — <span id="model">…</span></li>
+        <li><span class="swatch knowledge"></span>Knowledge — <span id="chunks">…</span> chunks</li>
+        <li><span class="swatch tools"></span>Tools — <span id="tools">…</span></li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Notes <button id="reingest" class="small">re-ingest</button></h2>
+      <ul id="notes" class="notes"></ul>
+    </section>
+
+    <section>
+      <h2>Try</h2>
+      <ul class="suggestions">
+        <li>What's on my reading list?</li>
+        <li>How is this assistant built?</li>
+        <li>What is 17% of 2,340?</li>
+        <li>What day is it today?</li>
+        <li>Save a note titled Groceries: milk, eggs, coffee</li>
+        <li>What did I just save?</li>
+      </ul>
+    </section>
+
+    <button id="newsession" class="small">New session</button>
+  </aside>
+
+  <main>
+    <div id="messages"></div>
+    <form id="composer">
+      <textarea id="input" rows="1" placeholder="Ask about your notes… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
