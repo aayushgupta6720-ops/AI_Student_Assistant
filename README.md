@@ -113,6 +113,19 @@ burns quickly. Daily-quota exhaustion comes back as a 429 with a long
 `retryDelay`; the provider gives up instead of sleeping when that delay
 exceeds `rate_limit_max_wait_s`.
 
+## Deploy to Render
+
+`render.yaml` defines the service as a Render Blueprint (native Python
+runtime, free plan, `/health` as the health check). In the Render dashboard
+choose **New → Blueprint**, pick this repo, and paste your `GEMINI_API_KEY`
+when prompted (it's marked `sync: false` so it never lives in the repo).
+
+Render's filesystem is ephemeral, so the app re-ingests `data/notes/*.md`
+on startup whenever the index is empty. Notes created with `save_note`
+persist only until the next deploy or restart; attach a persistent disk
+(paid) if you need them to survive. The free plan sleeps after inactivity,
+so the first request after a while takes ~30–60 s.
+
 ## Tests
 
 ```bash
