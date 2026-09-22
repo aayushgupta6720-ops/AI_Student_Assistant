@@ -1,5 +1,0 @@
-# Groceries
-
-- milk
-- eggs
-- coffee
