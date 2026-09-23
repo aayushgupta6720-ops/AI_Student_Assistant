@@ -34,6 +34,9 @@ from app.inference.types import (
 
 _MAX_RATE_LIMIT_RETRIES = 5
 _EMBED_TASK = {"document": "RETRIEVAL_DOCUMENT", "query": "RETRIEVAL_QUERY"}
+# Gemini rejects an embed request with more than 100 texts ("at most 100
+# requests can be in one batch").
+MAX_TEXTS_PER_EMBED_REQUEST = 100
 
 
 @lru_cache
@@ -49,6 +52,20 @@ def _rate_limit_retry_delay(exc: ClientError, fallback: float) -> float:
             if match:
                 return float(match.group(1))
     return fallback
+
+
+def _rate_limit_backoff(exc: ClientError, attempt: int) -> float:
+    """Seconds to wait before retrying exc. Re-raises it instead when it isn't
+    worth retrying: not a 429, out of attempts, or the server wants a longer
+    wait than rate_limit_max_wait_s."""
+    delay = _rate_limit_retry_delay(exc, fallback=2**attempt)
+    if (
+        exc.code != 429
+        or attempt == _MAX_RATE_LIMIT_RETRIES
+        or delay > get_settings().rate_limit_max_wait_s
+    ):
+        raise exc
+    return delay
 
 
 # ---- neutral -> Gemini -------------------------------------------------------
@@ -145,14 +162,7 @@ class GeminiProvider:
                 yield StreamEnd(finish_reason="stop")
                 return
             except ClientError as exc:
-                delay = _rate_limit_retry_delay(exc, fallback=2**attempt)
-                if (
-                    exc.code != 429
-                    or attempt == _MAX_RATE_LIMIT_RETRIES
-                    or delay > get_settings().rate_limit_max_wait_s
-                ):
-                    raise
-                await asyncio.sleep(delay)
+                await asyncio.sleep(_rate_limit_backoff(exc, attempt))
 
         async def _chunks():
             yield first
@@ -196,15 +206,28 @@ class GeminiProvider:
         yield StreamEnd(finish_reason=finish_reason)
 
     async def embed(self, texts: list[str], kind: EmbedKind) -> list[list[float]]:
-        response = await _client().aio.models.embed_content(
-            model=self.embedding_model,
-            contents=texts,
-            config=types.EmbedContentConfig(
-                task_type=_EMBED_TASK[kind],
-                output_dimensionality=self.embedding_dim,
-            ),
+        vectors: list[list[float]] = []
+        # Sequential, not concurrent: parallel batches would just trip the
+        # per-minute quota sooner.
+        for start in range(0, len(texts), MAX_TEXTS_PER_EMBED_REQUEST):
+            batch = texts[start : start + MAX_TEXTS_PER_EMBED_REQUEST]
+            vectors.extend(await self._embed_batch(batch, kind))
+        return vectors
+
+    async def _embed_batch(self, texts: list[str], kind: EmbedKind) -> list[list[float]]:
+        config = types.EmbedContentConfig(
+            task_type=_EMBED_TASK[kind],
+            output_dimensionality=self.embedding_dim,
         )
-        return [e.values for e in response.embeddings]
+        for attempt in range(1, _MAX_RATE_LIMIT_RETRIES + 1):
+            try:
+                response = await _client().aio.models.embed_content(
+                    model=self.embedding_model, contents=texts, config=config
+                )
+                return [e.values for e in response.embeddings]
+            except ClientError as exc:
+                await asyncio.sleep(_rate_limit_backoff(exc, attempt))
+        raise AssertionError("unreachable")
 
 
 @lru_cache
