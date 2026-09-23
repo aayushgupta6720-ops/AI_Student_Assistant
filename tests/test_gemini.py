@@ -4,10 +4,21 @@ import pytest
 from google.genai.errors import ClientError
 
 import app.inference.gemini as gemini
+from app.inference.provider import QuotaExceededError
+from app.inference.types import Message, TextPart
+
+DAILY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
 
 
-def _rate_limited(retry_delay: str) -> ClientError:
+def _rate_limited(retry_delay: str, quota_id: str | None = None) -> ClientError:
+    """A 429 shaped like Gemini's: a RetryInfo delay, plus a QuotaFailure
+    naming the quota that was hit when quota_id is given."""
     details = [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay}]
+    if quota_id:
+        details.append({
+            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            "violations": [{"quotaId": quota_id, "quotaValue": "500"}],
+        })
     return ClientError(429, {"error": {"code": 429, "message": "quota", "details": details}})
 
 
@@ -52,15 +63,35 @@ async def test_embed_retries_a_rate_limit_then_succeeds(embed_calls):
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected"),
     [
-        _rate_limited("59s"),  # a daily quota: waiting a minute won't help
-        ClientError(400, {"error": {"code": 400, "message": "bad request"}}),
+        (_rate_limited("0.01s", quota_id=DAILY), QuotaExceededError),  # short delay, still daily
+        (_rate_limited("59s"), QuotaExceededError),  # longer than rate_limit_max_wait_s
+        (ClientError(400, {"error": {"code": 400, "message": "bad request"}}), ClientError),
     ],
 )
-async def test_embed_does_not_retry_what_retrying_cannot_fix(embed_calls, error):
+async def test_embed_does_not_retry_what_retrying_cannot_fix(embed_calls, error, expected):
     calls = embed_calls([error])
 
-    with pytest.raises(ClientError):
+    with pytest.raises(expected):
         await gemini.GeminiProvider().embed(["a"], "query")
     assert len(calls) == 1
+
+
+async def test_daily_quota_on_chat_becomes_a_neutral_error_with_the_reset_time(monkeypatch):
+    async def generate_content_stream(**kwargs):
+        raise _rate_limited("59s", quota_id=DAILY)
+
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=generate_content_stream)))
+    monkeypatch.setattr(gemini, "_client", lambda: client)
+
+    with pytest.raises(QuotaExceededError) as caught:
+        async for _ in gemini.GeminiProvider().stream_generate(
+            system="s", messages=[Message("user", [TextPart("hi")])], tools=[]
+        ):
+            pass
+
+    assert caught.value.daily
+    resets_at = caught.value.resets_at
+    assert (resets_at.hour, resets_at.minute) == (0, 0)  # midnight...
+    assert resets_at.utcoffset().total_seconds() / 3600 in (-7, -8)  # ...Pacific (PDT or PST)

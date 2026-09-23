@@ -54,7 +54,15 @@ const handlers = {
       `<div>${d.iterations} model call(s) · ${d.total_tokens} tokens · tools: ${d.tools_used.length ? d.tools_used.map(esc).join(", ") : "none"}</div>`;
     if (d.tools_used.includes("save_note")) loadSidebar();
   },
-  error: (v, d) => { v.answer.classList.remove("cursor"); v.answer.innerHTML += `<p class="error">${esc(d.message)}</p>`; },
+  error: (v, d) => {
+    v.answer.classList.remove("cursor");
+    let message = d.message;
+    if (d.resets_at) {
+      const at = new Date(d.resets_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      message += ` That's ${at} your time.`;
+    }
+    v.answer.innerHTML += `<p class="error">${esc(message)}</p>`;
+  },
 };
 
 // SSE over a POST body: EventSource can't do that, so parse the stream by hand.

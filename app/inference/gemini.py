@@ -10,15 +10,17 @@ Responsibilities:
 import asyncio
 import re
 import uuid
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import AsyncIterator
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google import genai
 from google.genai import types
 from google.genai.errors import ClientError
 
 from app.config import get_settings
-from app.inference.provider import EmbedKind
+from app.inference.provider import EmbedKind, QuotaExceededError
 from app.inference.types import (
     Message,
     StreamEnd,
@@ -54,17 +56,41 @@ def _rate_limit_retry_delay(exc: ClientError, fallback: float) -> float:
     return fallback
 
 
+def _is_daily_quota(exc: ClientError) -> bool:
+    """True for a 429 caused by a per-day quota (e.g. the free tier's
+    requests-per-day cap). Its RetryInfo still suggests ~60s, but no retry can
+    succeed until the quota resets."""
+    details = (exc.details or {}).get("error", {}).get("details", [])
+    return any(
+        "PerDay" in violation.get("quotaId", "")
+        for detail in details
+        if detail.get("@type", "").endswith("QuotaFailure")
+        for violation in detail.get("violations", [])
+    )
+
+
+def _next_pacific_midnight() -> datetime | None:
+    """When Gemini's per-day quotas next reset: midnight Pacific time."""
+    try:
+        pacific = ZoneInfo("America/Los_Angeles")
+    except ZoneInfoNotFoundError:
+        return None  # no tz database on this host; callers still say "midnight Pacific"
+    tomorrow = datetime.now(pacific).date() + timedelta(days=1)
+    return datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=pacific)
+
+
 def _rate_limit_backoff(exc: ClientError, attempt: int) -> float:
-    """Seconds to wait before retrying exc. Re-raises it instead when it isn't
-    worth retrying: not a 429, out of attempts, or the server wants a longer
-    wait than rate_limit_max_wait_s."""
-    delay = _rate_limit_retry_delay(exc, fallback=2**attempt)
-    if (
-        exc.code != 429
-        or attempt == _MAX_RATE_LIMIT_RETRIES
-        or delay > get_settings().rate_limit_max_wait_s
-    ):
+    """Seconds to wait before retrying exc. Raises instead when retrying isn't
+    worth it: exc itself if it isn't a 429, QuotaExceededError for a 429 we
+    can't wait out (a daily quota, out of attempts, or the server wants a
+    longer wait than rate_limit_max_wait_s)."""
+    if exc.code != 429:
         raise exc
+    if _is_daily_quota(exc):
+        raise QuotaExceededError(str(exc), daily=True, resets_at=_next_pacific_midnight()) from exc
+    delay = _rate_limit_retry_delay(exc, fallback=2**attempt)
+    if attempt == _MAX_RATE_LIMIT_RETRIES or delay > get_settings().rate_limit_max_wait_s:
+        raise QuotaExceededError(str(exc), daily=False) from exc
     return delay
 
 
