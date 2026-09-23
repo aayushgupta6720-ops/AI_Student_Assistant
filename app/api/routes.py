@@ -19,6 +19,7 @@ from app.intelligence.agent import (
     AgentToolCall,
     AgentToolResult,
 )
+from app.inference.provider import QuotaExceededError
 from app.knowledge.ingest import ingest_dir
 from app.observability import log_event
 
@@ -32,6 +33,23 @@ class ChatRequest(BaseModel):
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+def _quota_error(exc: QuotaExceededError) -> dict:
+    """What the chat shows instead of the raw 429. The client adds resets_at
+    in the viewer's own timezone."""
+    if exc.daily:
+        message = (
+            "The assistant has used up today's free Gemini quota, so it can't "
+            "answer right now. The quota resets at midnight Pacific time."
+        )
+    else:
+        message = (
+            "The assistant is getting more requests than its Gemini quota "
+            "allows. Wait a minute and try again."
+        )
+    resets_at = exc.resets_at.isoformat() if exc.resets_at else None
+    return {"kind": "quota", "message": message, "resets_at": resets_at}
 
 
 def _preview(result: dict, limit: int = 300) -> dict:
@@ -104,6 +122,9 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
                         **{k: v for k, v in payload.items() if k != "answer"},
                     )
                     yield _sse("done", payload)
+        except QuotaExceededError as exc:
+            log_event(event="chat_quota_exceeded", session_id=body.session_id, daily=exc.daily, error=str(exc))
+            yield _sse("error", _quota_error(exc))
         except Exception as exc:  # noqa: BLE001 - report to the client instead of a dead stream
             log_event(event="chat_error", session_id=body.session_id, error=repr(exc))
             yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"})
