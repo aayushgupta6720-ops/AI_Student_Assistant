@@ -33,8 +33,18 @@ async def lifespan(app: FastAPI):
     # On hosts with an ephemeral filesystem (Render, Cloud Run) the index is
     # gone after every deploy, so build it on boot if it's empty.
     if store.count() == 0 and settings.notes_dir.exists():
-        counts = await ingest_dir(settings.notes_dir, store, provider)
-        log_event(event="startup_ingest", docs=len(counts), chunks=store.count())
+        try:
+            counts = await ingest_dir(settings.notes_dir, store, provider)
+            log_event(event="startup_ingest", docs=len(counts), chunks=store.count())
+        except Exception as exc:
+            # A quota 429, a bad key or a network blip shouldn't keep the whole
+            # app down: chat still works, search_notes just finds nothing
+            # until POST /ingest succeeds.
+            log_event(
+                event="startup_ingest_failed",
+                error=f"{type(exc).__name__}: {exc}",
+                chunks=store.count(),
+            )
 
     app.state.provider = provider
     app.state.store = store

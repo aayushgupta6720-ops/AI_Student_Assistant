@@ -80,6 +80,24 @@ def _slugify(title: str) -> str:
     return slug or "note"
 
 
+def _saved_title(path: Path) -> str:
+    first_line = path.read_text(encoding="utf-8").split("\n", 1)[0]
+    return first_line.lstrip("#").strip()
+
+
+def _note_path(notes_dir: Path, title: str) -> Path:
+    """The file for a note titled `title`. Saving under an existing title
+    overwrites that note; a different title that slugifies the same ("C notes"
+    vs "C++ notes") gets the next free "-2", "-3"... suffix instead."""
+    slug = _slugify(title)
+    n = 1
+    while True:
+        path = notes_dir / (f"{slug}.md" if n == 1 else f"{slug}-{n}.md")
+        if not path.exists() or _saved_title(path).casefold() == title.strip().casefold():
+            return path
+        n += 1
+
+
 def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> ToolRegistry:
     """Wire tools to the provider/store they need. Keeping this a factory (rather
     than module-level globals) is what lets tests inject a FakeProvider."""
@@ -98,7 +116,7 @@ def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> T
 
     async def save_note(title: str, content: str) -> dict:
         settings.notes_dir.mkdir(parents=True, exist_ok=True)
-        path: Path = settings.notes_dir / f"{_slugify(title)}.md"
+        path = _note_path(settings.notes_dir, title)
         path.write_text(f"# {title}\n\n{content.strip()}\n", encoding="utf-8")
         chunks = await ingest_file(path, store, provider)
         return {"doc_id": path.stem, "path": str(path), "chunks_indexed": chunks}
@@ -123,9 +141,9 @@ def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> T
     registry.register(
         Tool(
             "save_note",
-            "Create or overwrite a note in the user's notes folder and index it so "
-            "it becomes searchable. Use when the user asks to save, remember, or "
-            "write down something.",
+            "Create a note in the user's notes folder, or overwrite the one with the "
+            "same title, and index it so it becomes searchable. Use when the user "
+            "asks to save, remember, or write down something.",
             {
                 "type": "object",
                 "properties": {

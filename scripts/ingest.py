@@ -1,9 +1,10 @@
-"""CLI: ingest every markdown note in data/notes into the vector store.
+"""CLI: sync the vector store with the markdown notes in data/notes: every
+note is re-chunked and re-embedded, and notes deleted from the folder are
+dropped from the store.
 
-    python -m scripts.ingest [--reset]
+    python -m scripts.ingest
 """
 
-import argparse
 import asyncio
 
 from app.config import get_settings
@@ -12,11 +13,9 @@ from app.knowledge.ingest import ingest_dir
 from app.knowledge.retrieval import get_store
 
 
-async def main(reset: bool) -> None:
+async def main() -> None:
     settings = get_settings()
     store = get_store()
-    if reset:
-        store.clear()
     counts = await ingest_dir(settings.notes_dir, store, get_provider())
     for doc_id, n in counts.items():
         print(f"  {doc_id}: {n} chunks")
@@ -24,7 +23,4 @@ async def main(reset: bool) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--reset", action="store_true", help="wipe the store first")
-    args = parser.parse_args()
-    asyncio.run(main(args.reset))
+    asyncio.run(main())

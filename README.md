@@ -91,7 +91,7 @@ per-layer totals don't double count (`tools.search_notes` wraps
 python3.12 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # put your GEMINI_API_KEY in .env
-python -m scripts.ingest    # chunk + embed data/notes/*.md into data/knowledge.sqlite
+python -m scripts.ingest    # sync data/notes/*.md into data/knowledge.sqlite (deleted notes are dropped)
 uvicorn app.main:app --reload
 ```
 
@@ -130,7 +130,9 @@ choose **New → Blueprint**, pick this repo, and paste your `GEMINI_API_KEY`
 when prompted (it's marked `sync: false` so it never lives in the repo).
 
 Render's filesystem is ephemeral, so the app re-ingests `data/notes/*.md`
-on startup whenever the index is empty. Notes created with `save_note`
+on startup whenever the index is empty. If that fails (a Gemini quota 429,
+a bad key), the app still boots and logs `startup_ingest_failed`; chat works
+but `search_notes` finds nothing until `POST /ingest` succeeds. Notes created with `save_note`
 persist only until the next deploy or restart; attach a persistent disk
 (paid) if you need them to survive. The free plan sleeps after inactivity,
 so the first request after a while takes ~30–60 s.
