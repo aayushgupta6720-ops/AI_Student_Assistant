@@ -115,10 +115,13 @@ Other endpoints: `GET /health`, `GET /notes`, `POST /ingest`, `POST /reset/{sess
 
 ### Model choice and free-tier quotas
 
-Default is `gemini-3.5-flash-lite` (set `GENERATION_MODEL` in `.env`). The
-bigger `gemini-3.6-flash` works too but the free tier allows only **20
-requests per day** on it, which an agent loop (2–3 model calls per turn)
-burns quickly. Daily-quota exhaustion comes back as a 429 with a long
+Default is `gemini-3.5-flash` (set `GENERATION_MODEL` in `.env`).
+`gemini-3.5-flash-lite` and `gemini-3.1-flash-lite` work too. Free-tier
+quotas are per model *and* per Google project, so if another app shares
+this key, giving each a different model keeps one from exhausting the
+other's daily quota. The bigger `gemini-3.6-flash` works but the free tier
+allows only **20 requests per day** on it, which an agent loop (2–3 model
+calls per turn) burns quickly. Daily-quota exhaustion comes back as a 429 with a long
 `retryDelay`; the provider gives up instead of sleeping when that delay
 exceeds `rate_limit_max_wait_s`.
 
