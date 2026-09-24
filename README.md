@@ -123,7 +123,10 @@ other's daily quota. The bigger `gemini-3.6-flash` works but the free tier
 allows only **20 requests per day** on it, which an agent loop (2–3 model
 calls per turn) burns quickly. Daily-quota exhaustion comes back as a 429 with a long
 `retryDelay`; the provider gives up instead of sleeping when that delay
-exceeds `rate_limit_max_wait_s`.
+exceeds `rate_limit_max_wait_s`, and the chat shows when the quota resets.
+Gemini also has capacity spikes (503 UNAVAILABLE, "high demand"): those are
+retried after 1s, 2s and 4s, then the chat says the model is overloaded and
+to try again in a minute, rather than showing the raw error.
 
 ## Deploy to Render
 

@@ -19,7 +19,7 @@ from app.intelligence.agent import (
     AgentToolCall,
     AgentToolResult,
 )
-from app.inference.provider import QuotaExceededError
+from app.inference.provider import ModelOverloadedError, QuotaExceededError
 from app.knowledge.ingest import ingest_dir
 from app.observability import log_event
 
@@ -125,6 +125,16 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
         except QuotaExceededError as exc:
             log_event(event="chat_quota_exceeded", session_id=body.session_id, daily=exc.daily, error=str(exc))
             yield _sse("error", _quota_error(exc))
+        except ModelOverloadedError as exc:
+            log_event(event="chat_model_overloaded", session_id=body.session_id, error=str(exc))
+            yield _sse("error", {
+                "kind": "overloaded",
+                "message": (
+                    "Gemini is overloaded right now (a temporary Google-side issue, "
+                    "not a problem with your message). Try again in a minute."
+                ),
+                "resets_at": None,
+            })
         except Exception as exc:  # noqa: BLE001 - report to the client instead of a dead stream
             log_event(event="chat_error", session_id=body.session_id, error=repr(exc))
             yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"})

@@ -17,10 +17,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google import genai
 from google.genai import types
-from google.genai.errors import ClientError
+from google.genai.errors import ClientError, ServerError
 
 from app.config import get_settings
-from app.inference.provider import EmbedKind, QuotaExceededError
+from app.inference.provider import EmbedKind, ModelOverloadedError, QuotaExceededError
 from app.inference.types import (
     Message,
     StreamEnd,
@@ -35,6 +35,10 @@ from app.inference.types import (
 )
 
 _MAX_RATE_LIMIT_RETRIES = 5
+# A 503 "high demand" usually clears within seconds to minutes: retry a few
+# times (1s, 2s, 4s) rather than make the user wait out a long spike.
+_MAX_OVERLOAD_ATTEMPTS = 4
+_OVERLOAD_BASE_DELAY_S = 1.0
 _EMBED_TASK = {"document": "RETRIEVAL_DOCUMENT", "query": "RETRIEVAL_QUERY"}
 # Gemini rejects an embed request with more than 100 texts ("at most 100
 # requests can be in one batch").
@@ -77,6 +81,17 @@ def _next_pacific_midnight() -> datetime | None:
         return None  # no tz database on this host; callers still say "midnight Pacific"
     tomorrow = datetime.now(pacific).date() + timedelta(days=1)
     return datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=pacific)
+
+
+def _overload_backoff(exc: ServerError, attempt: int) -> float:
+    """Seconds to wait before retrying a 503 UNAVAILABLE ("high demand"),
+    which Google says is usually temporary. Re-raises any other server error,
+    and raises ModelOverloadedError once the retries run out."""
+    if exc.code != 503:
+        raise exc
+    if attempt >= _MAX_OVERLOAD_ATTEMPTS:
+        raise ModelOverloadedError(str(exc)) from exc
+    return _OVERLOAD_BASE_DELAY_S * 2 ** (attempt - 1)
 
 
 def _rate_limit_backoff(exc: ClientError, attempt: int) -> float:
@@ -189,6 +204,8 @@ class GeminiProvider:
                 return
             except ClientError as exc:
                 await asyncio.sleep(_rate_limit_backoff(exc, attempt))
+            except ServerError as exc:
+                await asyncio.sleep(_overload_backoff(exc, attempt))
 
         async def _chunks():
             yield first
@@ -253,6 +270,8 @@ class GeminiProvider:
                 return [e.values for e in response.embeddings]
             except ClientError as exc:
                 await asyncio.sleep(_rate_limit_backoff(exc, attempt))
+            except ServerError as exc:
+                await asyncio.sleep(_overload_backoff(exc, attempt))
         raise AssertionError("unreachable")
 
 
