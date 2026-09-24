@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 
 import pytest
-from google.genai.errors import ClientError
+from google.genai.errors import ClientError, ServerError
 
 import app.inference.gemini as gemini
-from app.inference.provider import QuotaExceededError
+from app.inference.provider import ModelOverloadedError, QuotaExceededError
 from app.inference.types import Message, TextPart
 
 DAILY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
@@ -95,3 +95,57 @@ async def test_daily_quota_on_chat_becomes_a_neutral_error_with_the_reset_time(m
     resets_at = caught.value.resets_at
     assert (resets_at.hour, resets_at.minute) == (0, 0)  # midnight...
     assert resets_at.utcoffset().total_seconds() / 3600 in (-7, -8)  # ...Pacific (PDT or PST)
+
+
+def _overloaded() -> ServerError:
+    return ServerError(503, {"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    monkeypatch.setattr(gemini, "_OVERLOAD_BASE_DELAY_S", 0)
+
+
+async def test_embed_retries_an_overloaded_model_then_succeeds(embed_calls, no_backoff):
+    calls = embed_calls([_overloaded(), _overloaded()])
+
+    assert await gemini.GeminiProvider().embed(["a"], "query") == [["a"]]
+    assert len(calls) == 3
+
+
+async def test_persistent_overload_becomes_model_overloaded_error(embed_calls, no_backoff):
+    calls = embed_calls([_overloaded()] * 5)
+
+    with pytest.raises(ModelOverloadedError):
+        await gemini.GeminiProvider().embed(["a"], "query")
+    assert len(calls) == gemini._MAX_OVERLOAD_ATTEMPTS
+
+
+async def test_other_server_errors_are_not_retried(embed_calls, no_backoff):
+    calls = embed_calls([ServerError(500, {"error": {"code": 500, "message": "boom"}})])
+
+    with pytest.raises(ServerError):
+        await gemini.GeminiProvider().embed(["a"], "query")
+    assert len(calls) == 1
+
+
+async def test_overloaded_chat_becomes_model_overloaded_error(monkeypatch, no_backoff):
+    calls = []
+
+    async def generate_content_stream(**kwargs):
+        calls.append(kwargs)
+        raise _overloaded()
+
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=generate_content_stream)))
+    monkeypatch.setattr(gemini, "_client", lambda: client)
+
+    with pytest.raises(ModelOverloadedError):
+        async for _ in gemini.GeminiProvider().stream_generate(
+            system="s", messages=[Message("user", [TextPart("hi")])], tools=[]
+        ):
+            pass
+    assert len(calls) == gemini._MAX_OVERLOAD_ATTEMPTS
+
+
+def test_overload_backoff_doubles_from_one_second():
+    assert [gemini._overload_backoff(_overloaded(), n) for n in (1, 2, 3)] == [1.0, 2.0, 4.0]
