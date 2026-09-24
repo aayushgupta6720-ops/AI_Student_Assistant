@@ -27,6 +27,7 @@ from app.inference.types import (
     Usage,
 )
 from app.intelligence.memory import SessionStore
+from app.knowledge.retrieval import current_session
 from app.intelligence.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
 from app.observability import CallTrace, start_trace, time_step
 from app.tools.registry import ToolRegistry
@@ -90,6 +91,7 @@ class Agent:
 
     async def run_turn(self, session_id: str, user_text: str) -> AsyncIterator[AgentEvent]:
         trace = start_trace()
+        current_session.set(session_id)  # tools' searches see this session's uploads
         self.memory.append(session_id, Message("user", [TextPart(user_text)]))
 
         answer_parts: list[str] = []

@@ -15,7 +15,10 @@ Inference, Knowledge, Tools**. Each layer is its own Python package with a
 one-way dependency direction, and every request produces a trace showing
 which layers ran and for how long.
 
-Domain: a personal knowledge assistant over a folder of markdown notes.
+Domain: a personal study-notes assistant. It searches a folder of shared
+markdown notes plus notes you upload (`.md`, `.txt` or `.pdf`), which are
+**private to your chat session**. Another visitor's searches never see them,
+and they're deleted on *New session* or after 24 hours.
 Stack: Python 3.12, FastAPI, Gemini (`google-genai`), SQLite + numpy, vanilla JS.
 
 ## The five layers
@@ -111,7 +114,16 @@ curl -N -X POST localhost:8000/chat -H 'Content-Type: application/json' \
   -d '{"session_id":"cli","message":"What is on my reading list?"}'
 ```
 
-Other endpoints: `GET /health`, `GET /notes`, `POST /ingest`, `POST /reset/{session_id}`, `GET /docs`.
+Other endpoints: `GET /health`, `GET /notes?session_id=…` (shared notes plus
+that session's uploads), `POST /notes/upload` (multipart `session_id` + `file`;
+2 MB and 10 uploads per session), `DELETE /notes/{doc_id}?session_id=…`,
+`POST /ingest`, `POST /reset/{session_id}` (also deletes the session's uploads
+unless `?keep_uploads=true`), `GET /docs`.
+
+How uploads stay private: every stored chunk has an owner, either `""` for the
+shared notes or the uploading session's id. `search()` masks out other owners'
+rows, and the agent sets a `current_session` context variable each turn, so
+`search_notes` is scoped without passing a session id through every tool.
 
 ### Model choice and free-tier quotas
 

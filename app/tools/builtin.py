@@ -17,7 +17,7 @@ import httpx
 
 from app.config import get_settings
 from app.inference.provider import LLMProvider
-from app.knowledge.ingest import ingest_file
+from app.knowledge.ingest import ingest_file, slugify
 from app.knowledge.retrieval import get_store, retrieve
 from app.knowledge.store import VectorStore
 from app.tools.registry import Tool, ToolRegistry
@@ -75,11 +75,6 @@ async def fetch_url(url: str, max_chars: int = 4000) -> dict:
     return {"url": str(response.url), "status": response.status_code, "text": text[:max_chars]}
 
 
-def _slugify(title: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-    return slug or "note"
-
-
 def _saved_title(path: Path) -> str:
     first_line = path.read_text(encoding="utf-8").split("\n", 1)[0]
     return first_line.lstrip("#").strip()
@@ -89,7 +84,7 @@ def _note_path(notes_dir: Path, title: str) -> Path:
     """The file for a note titled `title`. Saving under an existing title
     overwrites that note; a different title that slugifies the same ("C notes"
     vs "C++ notes") gets the next free "-2", "-3"... suffix instead."""
-    slug = _slugify(title)
+    slug = slugify(title)
     n = 1
     while True:
         path = notes_dir / (f"{slug}.md" if n == 1 else f"{slug}-{n}.md")

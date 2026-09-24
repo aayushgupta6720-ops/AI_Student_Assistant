@@ -81,13 +81,19 @@ button:disabled { opacity: .5; cursor: default; }
 .status-error[hidden] { display: none; }
 .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .section-head h2 { margin: 0; }
+.section-actions { display: flex; gap: 2px; }
 .ingest-status { margin: 0 0 8px; font-size: 12.5px; color: var(--text-2); }
 .ingest-status:empty { display: none; }
 .ingest-status.ok { color: var(--success); }
 .ingest-status.fail { color: var(--danger); }
 .notes li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; }
 .notes li:last-child { border-bottom: 0; }
-.notes code { color: var(--text); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
+.notes code { min-width: 0; color: var(--text); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notes .meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.notes .yours { font-size: 11px; font-weight: 600; color: var(--accent-text); background: var(--accent-soft); border-radius: 999px; padding: 1px 7px; }
+.notes .remove { border: 0; background: none; color: var(--muted); font-size: 15px; line-height: 1; padding: 2px 4px; border-radius: 6px; }
+.notes .remove:hover { color: var(--danger); background: var(--surface-2); }
+.notes-hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.45; }
 .notes .count { flex-shrink: 0; font-size: 12px; color: var(--muted); background: var(--surface-2); border-radius: 999px; padding: 1px 8px; }
 .suggestions { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip {

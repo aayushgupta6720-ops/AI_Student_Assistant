@@ -15,6 +15,7 @@ from app.intelligence.agent import Agent                # intelligence layer
 from app.intelligence.memory import SessionStore
 from app.knowledge.ingest import ingest_dir
 from app.knowledge.retrieval import get_store           # knowledge layer
+from app.knowledge.uploads import UPLOAD_TTL_S
 from app.observability import configure_logging, log_event
 from app.tools.builtin import build_registry            # tools layer
 
@@ -29,6 +30,8 @@ async def lifespan(app: FastAPI):
     store = get_store()
     registry = build_registry(provider, store)
     memory = SessionStore(settings.memory_window_messages)
+
+    store.purge_uploads(UPLOAD_TTL_S)
 
     # On hosts with an ephemeral filesystem (Render, Cloud Run) the index is
     # gone after every deploy, so build it on boot if it's empty.

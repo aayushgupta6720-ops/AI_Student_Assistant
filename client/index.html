@@ -49,10 +49,15 @@
     <section>
       <div class="section-head">
         <h2>Notes</h2>
-        <button id="reingest" type="button" class="btn-ghost small">Re-ingest</button>
+        <div class="section-actions">
+          <button id="upload" type="button" class="btn-ghost small">Upload</button>
+          <button id="reingest" type="button" class="btn-ghost small">Re-ingest</button>
+        </div>
+        <input id="upload-input" type="file" accept=".md,.txt,.pdf" hidden />
       </div>
       <p id="ingest-status" class="ingest-status" role="status" aria-live="polite"></p>
       <ul id="notes" class="notes"></ul>
+      <p class="notes-hint">Upload .md, .txt or .pdf notes (up to 2 MB). They're private to this chat, and removed on New session or after 24 hours.</p>
     </section>
 
     <section>
