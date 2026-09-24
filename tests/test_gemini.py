@@ -1,11 +1,13 @@
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from google.genai import types
 from google.genai.errors import ClientError, ServerError
 
 import app.inference.gemini as gemini
-from app.inference.provider import ModelOverloadedError, QuotaExceededError
-from app.inference.types import Message, TextPart
+from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
+from app.inference.types import Message, TextDelta, TextPart
 
 DAILY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
 
@@ -149,3 +151,81 @@ async def test_overloaded_chat_becomes_model_overloaded_error(monkeypatch, no_ba
 
 def test_overload_backoff_doubles_from_one_second():
     assert [gemini._overload_backoff(_overloaded(), n) for n in (1, 2, 3)] == [1.0, 2.0, 4.0]
+
+
+async def test_embed_timeout_fails_fast_without_retrying(embed_calls):
+    calls = embed_calls([httpx.ReadTimeout("timed out"), None])
+
+    with pytest.raises(ModelTimeoutError):
+        await gemini.GeminiProvider().embed(["a"], "query")
+    assert len(calls) == 1
+
+
+class _StallingStream:
+    """Yields the given chunks, then times out like a stalled HTTP stream."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.chunks:
+            return self.chunks.pop(0)
+        raise httpx.ReadTimeout("timed out")
+
+
+def _install_stream(monkeypatch, make_stream):
+    calls = []
+
+    async def generate_content_stream(**kwargs):
+        calls.append(kwargs)
+        return make_stream()
+
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=generate_content_stream)))
+    monkeypatch.setattr(gemini, "_client", lambda: client)
+    return calls
+
+
+async def _stream_events():
+    events = []
+    async for event in gemini.GeminiProvider().stream_generate(
+        system="s", messages=[Message("user", [TextPart("hi")])], tools=[]
+    ):
+        events.append(event)
+    return events
+
+
+async def test_stream_that_never_starts_times_out(monkeypatch):
+    calls = _install_stream(monkeypatch, lambda: _StallingStream([]))
+
+    with pytest.raises(ModelTimeoutError):
+        await _stream_events()
+    assert len(calls) == 1  # not retried
+
+
+async def test_stream_that_stalls_partway_times_out_after_its_text(monkeypatch):
+    first = types.GenerateContentResponse(
+        candidates=[types.Candidate(content=types.Content(role="model", parts=[types.Part(text="Hel")]))]
+    )
+    _install_stream(monkeypatch, lambda: _StallingStream([first]))
+    seen = []
+
+    with pytest.raises(ModelTimeoutError):
+        async for event in gemini.GeminiProvider().stream_generate(
+            system="s", messages=[Message("user", [TextPart("hi")])], tools=[]
+        ):
+            seen.append(event)
+    assert seen == [TextDelta(text="Hel", provider_state={})]
+
+
+def test_client_is_built_with_the_configured_timeout(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setattr(gemini, "get_settings", lambda: Settings(_env_file=None, gemini_api_key="x", gemini_timeout_s=12.5))
+    gemini._client.cache_clear()
+    try:
+        assert gemini._client()._api_client._http_options.timeout == 12_500  # milliseconds
+    finally:
+        gemini._client.cache_clear()

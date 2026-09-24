@@ -126,7 +126,9 @@ turn) burns in a few turns. Daily-quota exhaustion comes back as a 429 with a lo
 exceeds `rate_limit_max_wait_s`, and the chat shows when the quota resets.
 Gemini also has capacity spikes (503 UNAVAILABLE, "high demand"): those are
 retried after 1s, 2s and 4s, then the chat says the model is overloaded and
-to try again in a minute, rather than showing the raw error.
+to try again in a minute, rather than showing the raw error. A call that
+sends nothing for `GEMINI_TIMEOUT_S` (60s), at the start or partway through a
+streamed answer, is stopped and the chat says so, instead of hanging.
 
 ## Deploy to Render
 

@@ -19,7 +19,7 @@ from app.intelligence.agent import (
     AgentToolCall,
     AgentToolResult,
 )
-from app.inference.provider import ModelOverloadedError, QuotaExceededError
+from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
 from app.knowledge.ingest import ingest_dir
 from app.observability import log_event
 
@@ -132,6 +132,17 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
                 "message": (
                     "Gemini is overloaded right now (a temporary Google-side issue, "
                     "not a problem with your message). Try again in a minute."
+                ),
+                "resets_at": None,
+            })
+        except ModelTimeoutError as exc:
+            log_event(event="chat_model_timeout", session_id=body.session_id, error=str(exc))
+            yield _sse("error", {
+                "kind": "timeout",
+                "message": (
+                    f"Gemini didn't respond within {get_settings().gemini_timeout_s:g} seconds, so the "
+                    "request was stopped. It's usually a temporary slowdown on Google's side; "
+                    "try again in a minute."
                 ),
                 "resets_at": None,
             })
