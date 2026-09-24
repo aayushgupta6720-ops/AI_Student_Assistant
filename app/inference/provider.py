@@ -12,6 +12,11 @@ class ModelOverloadedError(Exception):
     usually works."""
 
 
+class ModelTimeoutError(Exception):
+    """The model sent nothing within the configured timeout, either at the
+    start of a call or partway through a streamed answer."""
+
+
 class QuotaExceededError(Exception):
     """The provider refused a call over quota and retrying now won't help.
     Provider-neutral, so the API layer can tell the user what happened

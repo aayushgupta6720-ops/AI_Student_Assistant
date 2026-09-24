@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     # Give up on a 429 if the server asks us to wait longer than this (daily
     # quota exhaustion comes back as a 429 too - no point sleeping a minute).
     rate_limit_max_wait_s: float = 20.0
+    # Per-request limit on Gemini calls, including each wait between streamed
+    # chunks. A slow-but-working call has taken up to ~47s during a demand
+    # spike; past this, a stalled call is abandoned.
+    gemini_timeout_s: float = 60.0
 
     notes_dir: Path = PROJECT_ROOT / "data" / "notes"
     store_path: Path = PROJECT_ROOT / "data" / "knowledge.sqlite"

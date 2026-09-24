@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 import app.main as main
-from app.inference.provider import ModelOverloadedError, QuotaExceededError
+from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
 
 
 class QuotaAgent:
@@ -57,3 +57,11 @@ async def test_overloaded_model_says_it_is_temporary(monkeypatch):
     assert data["kind"] == "overloaded"
     assert "Gemini is overloaded right now" in data["message"]
     assert "UNAVAILABLE" not in data["message"]
+
+
+async def test_timeout_says_the_request_was_stopped(monkeypatch):
+    [(event, data)] = await _chat_events(monkeypatch, QuotaAgent(ModelTimeoutError("no response from Gemini within 60s")))
+
+    assert event == "error"
+    assert data["kind"] == "timeout"
+    assert "didn't respond within 60 seconds" in data["message"]

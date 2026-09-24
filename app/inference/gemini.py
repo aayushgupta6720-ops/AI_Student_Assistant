@@ -15,12 +15,13 @@ from functools import lru_cache
 from typing import AsyncIterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import httpx
 from google import genai
 from google.genai import types
 from google.genai.errors import ClientError, ServerError
 
 from app.config import get_settings
-from app.inference.provider import EmbedKind, ModelOverloadedError, QuotaExceededError
+from app.inference.provider import EmbedKind, ModelOverloadedError, ModelTimeoutError, QuotaExceededError
 from app.inference.types import (
     Message,
     StreamEnd,
@@ -47,7 +48,18 @@ MAX_TEXTS_PER_EMBED_REQUEST = 100
 
 @lru_cache
 def _client() -> genai.Client:
-    return genai.Client(api_key=get_settings().gemini_api_key)
+    settings = get_settings()
+    return genai.Client(
+        api_key=settings.gemini_api_key,
+        # Milliseconds, applied to connecting and to each read, so a stream
+        # that stalls partway is caught as well as one that never starts.
+        http_options=types.HttpOptions(timeout=int(settings.gemini_timeout_s * 1000)),
+    )
+
+
+def _timeout_error() -> ModelTimeoutError:
+    # Not retried: a retry would double an already long wait.
+    return ModelTimeoutError(f"no response from Gemini within {get_settings().gemini_timeout_s:g}s")
 
 
 def _rate_limit_retry_delay(exc: ClientError, fallback: float) -> float:
@@ -206,11 +218,16 @@ class GeminiProvider:
                 await asyncio.sleep(_rate_limit_backoff(exc, attempt))
             except ServerError as exc:
                 await asyncio.sleep(_overload_backoff(exc, attempt))
+            except httpx.TimeoutException as exc:
+                raise _timeout_error() from exc
 
         async def _chunks():
             yield first
-            async for c in stream:
-                yield c
+            try:
+                async for c in stream:
+                    yield c
+            except httpx.TimeoutException as exc:  # the stream stalled partway
+                raise _timeout_error() from exc
 
         finish_reason = "stop"
         usage: Usage | None = None
@@ -272,6 +289,8 @@ class GeminiProvider:
                 await asyncio.sleep(_rate_limit_backoff(exc, attempt))
             except ServerError as exc:
                 await asyncio.sleep(_overload_backoff(exc, attempt))
+            except httpx.TimeoutException as exc:
+                raise _timeout_error() from exc
         raise AssertionError("unreachable")
 
 
