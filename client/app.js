@@ -6,13 +6,26 @@ const $ = (s) => document.querySelector(s);
 const messages = $("#messages"), input = $("#input"), sendBtn = $("#send");
 const LAYERS = ["intelligence", "inference", "knowledge", "tools"];
 
+async function getJSON(url, options) {
+  const res = await fetch(url, options);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 async function loadSidebar() {
-  const h = await (await fetch("/health")).json();
-  $("#model").textContent = h.model;
-  $("#chunks").textContent = h.chunks_indexed;
-  $("#tools").textContent = h.tools.join(", ");
-  const n = await (await fetch("/notes")).json();
-  $("#notes").innerHTML = n.docs.map(d => `<li><code>${d.doc_id}</code><span>${d.chunks} chunks</span></li>`).join("") || "<li class='muted'>no notes ingested</li>";
+  try {
+    const [h, n] = await Promise.all([getJSON("/health"), getJSON("/notes")]);
+    $("#model").textContent = h.model;
+    $("#chunks").textContent = h.chunks_indexed;
+    $("#tools").textContent = `${h.tools.length} available`;
+    $("#tools").title = h.tools.join(", ");
+    $("#notes").innerHTML = n.docs.map(d => `<li><code>${esc(d.doc_id)}</code><span class="count">${d.chunks} chunk${d.chunks === 1 ? "" : "s"}</span></li>`).join("")
+      || "<li class='muted'>No notes ingested yet</li>";
+    $("#status-error").hidden = true;
+  } catch (e) {
+    $("#status-error-text").textContent = `Can't reach the server (${e.message}).`;
+    $("#status-error").hidden = false;
+  }
 }
 
 function addUser(text) {
@@ -100,7 +113,36 @@ async function chat(text) {
 $("#composer").addEventListener("submit", (e) => { e.preventDefault(); const t = input.value.trim(); if (!t) return; input.value = ""; input.style.height = "auto"; chat(t); });
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); } });
 input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; });
-document.querySelectorAll(".suggestions li").forEach(li => li.addEventListener("click", () => chat(li.textContent)));
-$("#newsession").addEventListener("click", async () => { await fetch(`/reset/${sessionId}`, { method: "POST" }); messages.innerHTML = ""; });
-$("#reingest").addEventListener("click", async (e) => { e.target.disabled = true; await fetch("/ingest", { method: "POST" }); await loadSidebar(); e.target.disabled = false; });
+// On narrow screens the sidebar is a drawer (see style.css); on wide ones these are no-ops.
+const menuBtn = $("#menu");
+function setDrawer(open) {
+  document.body.classList.toggle("drawer-open", open);
+  menuBtn.setAttribute("aria-expanded", String(open));
+}
+menuBtn.addEventListener("click", () => setDrawer(!document.body.classList.contains("drawer-open")));
+$("#backdrop").addEventListener("click", () => setDrawer(false));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.body.classList.contains("drawer-open")) { setDrawer(false); menuBtn.focus(); }
+});
+
+document.querySelectorAll(".suggestions button").forEach(b => b.addEventListener("click", () => { setDrawer(false); chat(b.textContent.trim()); }));
+$("#newsession").addEventListener("click", async () => { setDrawer(false); await fetch(`/reset/${sessionId}`, { method: "POST" }); messages.innerHTML = ""; });
+$("#status-retry").addEventListener("click", loadSidebar);
+$("#reingest").addEventListener("click", async (e) => {
+  const btn = e.currentTarget, status = $("#ingest-status");
+  btn.disabled = true; btn.textContent = "Re-ingesting…";
+  status.className = "ingest-status"; status.textContent = "";
+  try {
+    const r = await getJSON("/ingest", { method: "POST" });
+    const notes = Object.keys(r.ingested).length;
+    status.textContent = `Indexed ${notes} note${notes === 1 ? "" : "s"} · ${r.chunks_indexed} chunks`;
+    status.classList.add("ok");
+  } catch (err) {
+    status.textContent = `Re-ingest failed (${err.message})`;
+    status.classList.add("fail");
+  } finally {
+    btn.disabled = false; btn.textContent = "Re-ingest";
+    await loadSidebar();
+  }
+});
 loadSidebar();
