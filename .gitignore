@@ -3,3 +3,4 @@ __pycache__/
 .env
 data/knowledge.sqlite
 .pytest_cache/
+.DS_Store
