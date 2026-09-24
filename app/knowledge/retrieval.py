@@ -1,3 +1,4 @@
+import contextvars
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -12,6 +13,14 @@ class RetrievedChunk:
     doc_id: str
     text: str
     score: float
+
+
+# The session being served, so a search sees the shared notes plus that
+# session's private uploads without threading a session id through the agent
+# loop and every tool signature. The intelligence layer sets it per turn.
+current_session: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_session", default=None
+)
 
 
 @lru_cache
@@ -32,5 +41,5 @@ async def retrieve(
     with time_step("inference", "embed_query"):
         [query_vec] = await provider.embed([query], "query")
     with time_step("knowledge", "vector_search", k=k):
-        hits = store.search(query_vec, k)
+        hits = store.search(query_vec, k, owner=current_session.get())
     return [RetrievedChunk(h.doc_id, h.text, round(h.score, 4)) for h in hits]

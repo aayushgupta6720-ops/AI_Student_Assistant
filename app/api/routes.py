@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,7 @@ from app.intelligence.agent import (
 )
 from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
 from app.knowledge.ingest import ingest_dir
+from app.knowledge.uploads import MAX_UPLOAD_BYTES, UploadError, ingest_upload
 from app.observability import log_event
 
 router = APIRouter()
@@ -70,8 +71,39 @@ async def health(request: Request) -> dict:
 
 
 @router.get("/notes")
-async def notes(request: Request) -> dict:
-    return {"docs": request.app.state.store.list_docs()}
+async def notes(request: Request, session_id: str | None = Query(default=None, max_length=64)) -> dict:
+    """The shared notes, plus this session's private uploads (flagged)."""
+    return {"docs": request.app.state.store.list_docs(owner=session_id)}
+
+
+@router.post("/notes/upload")
+async def upload_note(
+    request: Request,
+    session_id: str = Form(min_length=1, max_length=64),
+    file: UploadFile = File(),
+) -> dict:
+    """Add a .md/.txt/.pdf note that only this session's searches can see."""
+    data = await file.read(MAX_UPLOAD_BYTES + 1)  # one byte over is enough to refuse it
+    try:
+        result = await ingest_upload(
+            session_id, file.filename or "upload.txt", data, request.app.state.store, request.app.state.provider
+        )
+    except UploadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (QuotaExceededError, ModelOverloadedError, ModelTimeoutError) as exc:
+        # Uploading embeds the note, so it fails when the model provider does.
+        log_event(event="upload_failed", session_id=session_id, error=str(exc))
+        raise HTTPException(
+            status_code=503, detail="The embedding model is unavailable right now, so the note couldn't be indexed. Try again later."
+        ) from exc
+    log_event(event="note_uploaded", session_id=session_id, **result)
+    return result
+
+
+@router.delete("/notes/{doc_id}")
+async def delete_note(doc_id: str, request: Request, session_id: str = Query(min_length=1, max_length=64)) -> dict:
+    """Remove one of this session's uploads. Shared notes can't be deleted here."""
+    return {"deleted": request.app.state.store.delete_doc(doc_id, owner=session_id)}
 
 
 @router.post("/ingest")
@@ -82,8 +114,13 @@ async def ingest(request: Request) -> dict:
 
 
 @router.post("/reset/{session_id}")
-async def reset(session_id: str, request: Request) -> dict:
+async def reset(session_id: str, request: Request, keep_uploads: bool = False) -> dict:
+    """Forget the conversation, and (unless keep_uploads) the session's uploads.
+    The page calls it with keep_uploads on reload, which keeps the uploads
+    but clears the chat it no longer shows."""
     request.app.state.memory.reset(session_id)
+    if not keep_uploads:
+        request.app.state.store.delete_owner(session_id)
     return {"reset": session_id}
 
 

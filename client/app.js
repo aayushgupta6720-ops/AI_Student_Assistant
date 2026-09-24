@@ -1,7 +1,17 @@
 // Client layer. Knows three things: how to POST /chat, how to parse SSE, and
 // how to render the events. It has no idea what a model, tool or vector is.
 
-const sessionId = "web-" + Math.random().toString(36).slice(2, 10);
+// Kept in sessionStorage so a reload keeps this tab's private uploads (the
+// server scopes them to this id). Falls back to a fresh id if storage is off.
+const sessionId = (() => {
+  const fresh = "web-" + Math.random().toString(36).slice(2, 10);
+  try {
+    const saved = sessionStorage.getItem("sessionId");
+    if (saved) return saved;
+    sessionStorage.setItem("sessionId", fresh);
+  } catch { /* storage unavailable: a new id per page load */ }
+  return fresh;
+})();
 const $ = (s) => document.querySelector(s);
 const messages = $("#messages"), input = $("#input"), sendBtn = $("#send");
 const LAYERS = ["intelligence", "inference", "knowledge", "tools"];
@@ -14,12 +24,16 @@ async function getJSON(url, options) {
 
 async function loadSidebar() {
   try {
-    const [h, n] = await Promise.all([getJSON("/health"), getJSON("/notes")]);
+    const [h, n] = await Promise.all([getJSON("/health"), getJSON(`/notes?session_id=${encodeURIComponent(sessionId)}`)]);
     $("#model").textContent = h.model;
     $("#chunks").textContent = h.chunks_indexed;
     $("#tools").textContent = `${h.tools.length} available`;
     $("#tools").title = h.tools.join(", ");
-    $("#notes").innerHTML = n.docs.map(d => `<li><code>${esc(d.doc_id)}</code><span class="count">${d.chunks} chunk${d.chunks === 1 ? "" : "s"}</span></li>`).join("")
+    $("#notes").innerHTML = n.docs.map(d => `<li><code>${esc(d.doc_id)}</code><span class="meta">`
+      + (d.uploaded ? `<span class="yours">Yours</span>` : "")
+      + `<span class="count">${d.chunks} chunk${d.chunks === 1 ? "" : "s"}</span>`
+      + (d.uploaded ? `<button type="button" class="remove" data-doc="${esc(d.doc_id)}" aria-label="Remove ${esc(d.doc_id)}">×</button>` : "")
+      + `</span></li>`).join("")
       || "<li class='muted'>No notes ingested yet</li>";
     $("#status-error").hidden = true;
   } catch (e) {
@@ -128,6 +142,48 @@ document.addEventListener("keydown", (e) => {
 document.querySelectorAll(".suggestions button").forEach(b => b.addEventListener("click", () => { setDrawer(false); chat(b.textContent.trim()); }));
 $("#newsession").addEventListener("click", async () => { setDrawer(false); await fetch(`/reset/${sessionId}`, { method: "POST" }); messages.innerHTML = ""; });
 $("#status-retry").addEventListener("click", loadSidebar);
+
+function showNoteStatus(text, ok) {
+  const status = $("#ingest-status");
+  status.className = `ingest-status ${ok ? "ok" : "fail"}`;
+  status.textContent = text;
+}
+
+$("#upload").addEventListener("click", () => $("#upload-input").click());
+$("#upload-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";  // so choosing the same file again still fires "change"
+  if (!file) return;
+  const btn = $("#upload");
+  btn.disabled = true; btn.textContent = "Uploading…";
+  try {
+    const form = new FormData();
+    form.append("session_id", sessionId);
+    form.append("file", file);
+    const res = await fetch("/notes/upload", { method: "POST", body: form });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    showNoteStatus(`Added ${body.doc_id} (${body.chunks} chunk${body.chunks === 1 ? "" : "s"}), private to this chat`, true);
+  } catch (err) {
+    showNoteStatus(`Upload failed: ${err.message}`, false);
+  } finally {
+    btn.disabled = false; btn.textContent = "Upload";
+    await loadSidebar();
+  }
+});
+
+$("#notes").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".remove");
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    await getJSON(`/notes/${encodeURIComponent(btn.dataset.doc)}?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    showNoteStatus(`Removed ${btn.dataset.doc}`, true);
+  } catch (err) {
+    showNoteStatus(`Couldn't remove it (${err.message})`, false);
+  }
+  await loadSidebar();
+});
 $("#reingest").addEventListener("click", async (e) => {
   const btn = e.currentTarget, status = $("#ingest-status");
   btn.disabled = true; btn.textContent = "Re-ingesting…";
@@ -145,4 +201,8 @@ $("#reingest").addEventListener("click", async (e) => {
     await loadSidebar();
   }
 });
+
+// A reload keeps the session id (and its uploads) but not the chat on screen,
+// so clear the server-side conversation to match what the page shows.
+fetch(`/reset/${encodeURIComponent(sessionId)}?keep_uploads=true`, { method: "POST" }).catch(() => {});
 loadSidebar();
