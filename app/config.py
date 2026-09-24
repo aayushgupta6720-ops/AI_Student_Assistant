@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     app_name: str = "AI_Student_Assistant"
 
     gemini_api_key: str = ""
-    generation_model: str = "gemini-3.5-flash"
+    generation_model: str = "gemini-3.5-flash-lite"
     embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 768
     # Give up on a 429 if the server asks us to wait longer than this (daily

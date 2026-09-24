@@ -12,4 +12,4 @@ services:
       - key: GEMINI_API_KEY
         sync: false          # Render prompts for this on first deploy; never stored in the repo
       - key: GENERATION_MODEL
-        value: gemini-3.5-flash
+        value: gemini-3.5-flash-lite
