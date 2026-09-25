@@ -152,7 +152,10 @@ the numbers with `CHAT_LIMIT_PER_MINUTE`, `CHAT_LIMIT_PER_DAY`,
 `UPLOAD_LIMIT_PER_HOUR` and `INGEST_LIMIT_PER_HOUR`; 0 turns one off. Counts
 are in memory, which suits the single instance of Render's free plan, and
 reset on restart. Visitors sharing an IP, like a classroom behind one
-router, share one allowance.
+router, share one allowance. Request bodies over 128 KB (2.1 MB for
+`/notes/upload`) are refused with a 413 before they're read: FastAPI
+otherwise reads and parses all of a body before checking `max_length`, and
+a 52 MB message cost ~250 MB of memory on its way to a 422.
 
 Behind a proxy, the connecting address is the proxy's, so `CLIENT_IP_HEADER`
 names the header that carries the visitor's IP. Only use a header that the

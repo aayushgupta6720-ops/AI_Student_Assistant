@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.body_limit import BodySizeLimit
 from app.api.ratelimit import build_rate_limiters
 from app.api.routes import router
 from app.config import PROJECT_ROOT, get_settings
@@ -16,7 +17,7 @@ from app.intelligence.agent import Agent                # intelligence layer
 from app.intelligence.memory import SessionStore
 from app.knowledge.ingest import ingest_dir
 from app.knowledge.retrieval import get_store           # knowledge layer
-from app.knowledge.uploads import UPLOAD_TTL_S
+from app.knowledge.uploads import MAX_UPLOAD_BYTES, UPLOAD_TTL_S
 from app.observability import configure_logging, log_event
 from app.tools.builtin import build_registry            # tools layer
 
@@ -62,6 +63,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=get_settings().app_name, lifespan=lifespan)
 app.include_router(router)
 app.mount("/static", StaticFiles(directory=CLIENT_DIR), name="static")
+# A chat message is at most 8,000 chars, well under 128 KB even fully escaped;
+# an upload is up to MAX_UPLOAD_BYTES plus the multipart form around it.
+app.add_middleware(
+    BodySizeLimit,
+    max_bytes=128 * 1024,
+    max_bytes_by_path={"/notes/upload": MAX_UPLOAD_BYTES + 64 * 1024},
+)
 
 
 @app.get("/", include_in_schema=False)
