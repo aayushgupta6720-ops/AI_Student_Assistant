@@ -30,6 +30,7 @@ from app.intelligence.memory import SessionStore
 from app.knowledge.retrieval import current_session
 from app.intelligence.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
 from app.observability import CallTrace, start_trace, time_step
+from app.tools.builtin import user_timezone
 from app.tools.registry import ToolRegistry
 
 # ---- events the intelligence layer emits to whoever is driving it -----------
@@ -89,9 +90,12 @@ class Agent:
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations or get_settings().max_agent_iterations
 
-    async def run_turn(self, session_id: str, user_text: str) -> AsyncIterator[AgentEvent]:
+    async def run_turn(
+        self, session_id: str, user_text: str, timezone: str | None = None
+    ) -> AsyncIterator[AgentEvent]:
         trace = start_trace()
         current_session.set(session_id)  # tools' searches see this session's uploads
+        user_timezone.set(timezone)  # current_datetime answers in the user's zone
         self.memory.append(session_id, Message("user", [TextPart(user_text)]))
 
         answer_parts: list[str] = []

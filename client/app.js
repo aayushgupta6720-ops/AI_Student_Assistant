@@ -3,8 +3,11 @@
 
 // Kept in sessionStorage so a reload keeps this tab's private uploads (the
 // server scopes them to this id). Falls back to a fresh id if storage is off.
+// The id is all that guards those uploads, so it's 128 random bits from the
+// crypto API, not Math.random (getRandomValues also works over plain http).
 const sessionId = (() => {
-  const fresh = "web-" + Math.random().toString(36).slice(2, 10);
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const fresh = "web-" + Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
   try {
     const saved = sessionStorage.getItem("sessionId");
     if (saved) return saved;
@@ -62,12 +65,25 @@ function row(view, layer, html) {
 }
 const esc = (s) => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
+// The answer can repeat text from web pages and notes someone else wrote, so
+// render only the tags markdown makes: no raw HTML or scripts, and no images or
+// styles, which load a URL on their own and could carry chat contents off-site.
+const MARKDOWN_ONLY = {
+  ALLOWED_TAGS: ["p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "em", "strong", "del", "code", "pre",
+    "blockquote", "ul", "ol", "li", "a", "table", "thead", "tbody", "tr", "th", "td"],
+  ALLOWED_ATTR: ["href", "title", "start", "align"],
+};
+function renderMarkdown(el, text) {
+  if (window.marked && window.DOMPurify) el.innerHTML = DOMPurify.sanitize(marked.parse(text), MARKDOWN_ONLY);
+  else el.textContent = text;  // a CDN script didn't load: plain text beats unsafe HTML
+}
+
 const handlers = {
   status: (v, d) => row(v, "intelligence", `iteration ${d.iteration}: ${esc(d.text)}`),
   tool_call: (v, d) => row(v, "tools", `call <code>${esc(d.name)}(${esc(JSON.stringify(d.args))})</code>`),
   tool_result: (v, d) => row(v, d.name === "search_notes" || d.name === "save_note" ? "knowledge" : "tools",
     `${d.is_error ? '<span class="err">error</span> ' : ""}${esc(d.name)} → <code>${esc(d.preview)}</code>`),
-  token: (v, d) => { v.text += d.text; v.answer.innerHTML = marked.parse(v.text); messages.scrollTop = messages.scrollHeight; },
+  token: (v, d) => { v.text += d.text; renderMarkdown(v.answer, v.text); messages.scrollTop = messages.scrollHeight; },
   done: (v, d) => {
     v.answer.classList.remove("cursor");
     if (!v.text) v.answer.innerHTML = "<em class='muted'>(no text answer)</em>";
@@ -98,7 +114,7 @@ async function chat(text) {
   const view = addAssistant();
   sendBtn.disabled = true;
   try {
-    const res = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId, message: text }) });
+    const res = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId, message: text, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const reader = res.body.getReader(), dec = new TextDecoder();
     let buf = "";

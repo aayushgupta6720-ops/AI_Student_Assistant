@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     max_agent_iterations: int = 6
     memory_window_messages: int = 20
+    max_sessions: int = 1000  # conversations kept in memory; least recently used go first
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8"

@@ -11,7 +11,7 @@ class QuotaAgent:
     def __init__(self, error: QuotaExceededError) -> None:
         self.error = error
 
-    async def run_turn(self, session_id, user_text):
+    async def run_turn(self, session_id, user_text, timezone=None):
         raise self.error
         yield  # unreachable; makes this an async generator like Agent.run_turn
 

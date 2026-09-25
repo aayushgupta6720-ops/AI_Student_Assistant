@@ -21,7 +21,7 @@ from app.intelligence.agent import (
 )
 from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
 from app.knowledge.ingest import ingest_dir
-from app.knowledge.uploads import MAX_UPLOAD_BYTES, UploadError, ingest_upload
+from app.knowledge.uploads import MAX_UPLOAD_BYTES, UPLOAD_TTL_S, UploadError, ingest_upload
 from app.observability import log_event
 
 router = APIRouter()
@@ -30,6 +30,8 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=64)
     message: str = Field(min_length=1, max_length=8000)
+    # IANA name, e.g. "Asia/Kolkata", so "today" means the user's today.
+    timezone: str | None = Field(default=None, max_length=64)
 
 
 def _sse(event: str, data: dict) -> str:
@@ -73,7 +75,9 @@ async def health(request: Request) -> dict:
 @router.get("/notes")
 async def notes(request: Request, session_id: str | None = Query(default=None, max_length=64)) -> dict:
     """The shared notes, plus this session's private uploads (flagged)."""
-    return {"docs": request.app.state.store.list_docs(owner=session_id)}
+    store = request.app.state.store
+    store.purge_uploads(UPLOAD_TTL_S)
+    return {"docs": store.list_docs(owner=session_id)}
 
 
 @router.post("/notes/upload")
@@ -131,7 +135,7 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
     async def stream():
         started = time.perf_counter()
         try:
-            async for ev in agent.run_turn(body.session_id, body.message):
+            async for ev in agent.run_turn(body.session_id, body.message, timezone=body.timezone):
                 if isinstance(ev, AgentStatus):
                     yield _sse("status", asdict(ev))
                 elif isinstance(ev, AgentToolCall):
