@@ -82,14 +82,17 @@ def test_behind_a_trusted_proxy_the_configured_header_names_the_visitor(monkeypa
     assert client_key(request) == "198.51.100.4"
 
 
-def test_a_missing_proxy_header_falls_back_to_the_connecting_address_and_is_logged_once(monkeypatch):
+def test_without_the_proxy_header_everyone_shares_one_count_and_it_is_logged_once(monkeypatch):
+    # Not the connecting address: behind Render, uvicorn may have set that from
+    # X-Forwarded-For, which the visitor controls.
     monkeypatch.setattr(get_settings(), "client_ip_header", "CF-Connecting-IP")
     monkeypatch.setattr(ratelimit, "_warned_missing_header", False)
     logged = []
     monkeypatch.setattr(ratelimit, "log_event", lambda **fields: logged.append(fields))
 
-    assert client_key(_request("10.0.0.1")) == "10.0.0.1"
-    client_key(_request("10.0.0.1"))
+    keys = {client_key(_request(peer)) for peer in ("10.9.9.1", "10.9.9.2")}
+
+    assert keys == {"missing CF-Connecting-IP"}
     assert logged == [{"event": "client_ip_header_missing", "header": "CF-Connecting-IP"}]
 
 

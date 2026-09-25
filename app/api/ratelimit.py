@@ -93,11 +93,15 @@ def client_key(request: Request) -> str:
     global _warned_missing_header
     header = get_settings().client_ip_header
     ip = request.headers.get(header, "").strip() if header else ""
-    if header and not ip and not _warned_missing_header:
-        # Falls back to the proxy's address, so every visitor shares one
-        # count: strict, but a sign the header setting is wrong for this host.
-        _warned_missing_header = True
-        log_event(event="client_ip_header_missing", header=header)
+    if header and not ip:
+        # Everyone without the header shares one count: strict, but safe.
+        # Falling back to the connecting address isn't, since uvicorn may
+        # already have replaced it with X-Forwarded-For's first entry (Render
+        # sets FORWARDED_ALLOW_IPS=*, which tells it to).
+        if not _warned_missing_header:
+            _warned_missing_header = True
+            log_event(event="client_ip_header_missing", header=header)
+        return f"missing {header}"
     ip = ip or (request.client.host if request.client else "unknown")
     try:
         addr = ipaddress.ip_address(ip)
