@@ -156,9 +156,18 @@ router, share one allowance.
 
 Behind a proxy, the connecting address is the proxy's, so `CLIENT_IP_HEADER`
 names the header that carries the visitor's IP. Only use a header that the
-proxy *overwrites* when a client sends it; `X-Forwarded-For` is appended to,
-so its first entry is whatever the visitor chose. `render.yaml` sets
-`CF-Connecting-IP`, which Cloudflare (in front of Render) sets itself.
+proxy *overwrites* when a client sends it. On Render that's
+`CF-Connecting-IP`: Cloudflare, in front of Render, sets it and refuses
+requests that bring their own (a 403, "error code: 1000"). Not
+`X-Forwarded-For`: Render appends to it, and it sets `FORWARDED_ALLOW_IPS=*`
+for Python services, so uvicorn takes that header's first entry, which the
+visitor chose, as the connecting address. If the configured header is
+missing from a request, everyone without it shares one allowance.
+
+`render.yaml` sets `CLIENT_IP_HEADER`, but only services created from the
+Blueprint pick up `render.yaml`. The live demo was created in the dashboard,
+so its `CLIENT_IP_HEADER=CF-Connecting-IP` is set there; do the same for any
+service you create by hand.
 
 ### Model choice and free-tier quotas
 
@@ -193,23 +202,24 @@ restart also clears them. The free plan sleeps after inactivity, so the
 first request after a while takes ~30–60 s.
 
 To check the rate limit identifies visitors correctly after a deploy, send
-11 uploads that fail validation (so no quota is spent), each with made-up IP
-headers:
+11 uploads that fail validation (so no quota is spent), each with a made-up
+`X-Forwarded-For` (not `CF-Connecting-IP`, which Cloudflare refuses with a 403
+before it reaches the app):
 
 ```bash
 for i in $(seq 11); do curl -s -o /dev/null -w '%{http_code} ' \
-  -H "X-Forwarded-For: 10.9.9.$i" -H "CF-Connecting-IP: 10.9.9.$i" \
-  -F session_id=check -F 'file=@/dev/null;filename=x.exe' \
+  -H "X-Forwarded-For: 10.9.9.$i" \
+  -F session_id=check-$i -F 'file=@/dev/null;filename=x.exe' \
   https://ai-student-assistant-hz02.onrender.com/notes/upload; done
 ```
 
 Ten `400`s then a `429` means the made-up headers didn't count as new
-visitors. Run it against the deployed app, not localhost: uvicorn trusts
+visitors. It uses up your own upload allowance for an hour. Run it against the deployed app, not localhost: uvicorn trusts
 `X-Forwarded-For` on connections from `127.0.0.1` by default
 (`--forwarded-allow-ips`), so requests from your own machine can pick their
-address and you'll see eleven `400`s. Then check the Render logs for `client_ip_header_missing`: if it
-appears, the header isn't reaching the app and all visitors share one
-allowance, so `CLIENT_IP_HEADER` needs changing.
+address and you'll see eleven `400`s. Then check the Render logs for
+`client_ip_header_missing`: if it appears, the header isn't reaching the app
+and all visitors share one allowance, so `CLIENT_IP_HEADER` needs changing.
 
 ## Tests
 
