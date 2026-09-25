@@ -195,6 +195,9 @@ streamed answer, is stopped and the chat says so, instead of hanging.
 runtime, free plan, `/health` as the health check). In the Render dashboard
 choose **New → Blueprint**, pick this repo, and paste your `GEMINI_API_KEY`
 when prompted (it's marked `sync: false` so it never lives in the repo).
+Pick the repo through your connected GitHub account rather than pasting its
+public URL: Render only deploys on push for a repo connected through the
+account, and a public-URL service has to be deployed by hand.
 
 Render's filesystem is ephemeral, so the app re-ingests `data/notes/*.md`
 on startup whenever the index is empty. If that fails (a Gemini quota 429,
