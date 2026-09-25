@@ -94,8 +94,18 @@ class VectorStore:
                 "DELETE FROM chunks WHERE owner != ? AND created_at < ?",
                 (SHARED, time.time() - older_than_s),
             )
-        self._cache = None
+        if cur.rowcount:  # runs before every search, so keep the cache when nothing expired
+            self._cache = None
         return cur.rowcount
+
+    def first_line(self, doc_id: str, owner: str | None = None) -> str | None:
+        """The first line of a doc's first chunk (a note's "# Title"), or
+        None if `owner` has no such doc."""
+        row = self._conn.execute(
+            "SELECT text FROM chunks WHERE owner = ? AND doc_id = ? AND chunk_index = 0",
+            (owner or SHARED, doc_id),
+        ).fetchone()
+        return row[0].split("\n", 1)[0] if row else None
 
     def list_docs(self, owner: str | None = None) -> list[dict]:
         """The shared notes, plus `owner`'s uploads when an owner is given."""

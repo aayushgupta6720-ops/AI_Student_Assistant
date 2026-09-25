@@ -1,6 +1,9 @@
+import time
+
 import httpx
 import pytest
 
+import app.knowledge.uploads as uploads
 import app.main as main
 from app.intelligence.agent import Agent
 from app.intelligence.memory import SessionStore
@@ -9,7 +12,9 @@ from app.knowledge.retrieval import current_session, retrieve
 from app.knowledge.store import VectorStore
 from app.knowledge.uploads import (
     MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_CHARS,
     MAX_UPLOADS_PER_SESSION,
+    UPLOAD_TTL_S,
     UploadError,
     as_note,
     extract_text,
@@ -60,11 +65,19 @@ def test_extracts_markdown_text_and_pdf():
         ("blank.md", b"  \n\n ", "empty"),
         ("scan.pdf", _pdf(None), "Scanned PDFs"),
         ("broken.pdf", b"%PDF-1.4 not really", "couldn't be read"),
+        ("long.md", b"x" * (MAX_UPLOAD_CHARS + 1), "over 200,000 characters"),
     ],
 )
 def test_refuses_what_it_cannot_index_with_a_readable_reason(filename, data, message):
     with pytest.raises(UploadError, match=message):
         extract_text(filename, data)
+
+
+def test_a_small_pdf_with_too_much_text_is_refused(monkeypatch):
+    # The byte cap doesn't bound a compressed PDF's text; the character cap does.
+    monkeypatch.setattr(uploads, "MAX_UPLOAD_CHARS", 10)
+    with pytest.raises(UploadError, match="over 10 characters"):
+        extract_text("dense.pdf", _pdf("far more than ten characters"))
 
 
 def test_notes_without_a_title_get_one_from_the_file_name():
@@ -98,7 +111,7 @@ async def test_upload_limit_counts_distinct_notes_and_replacing_one_is_allowed(s
         await ingest_upload("alice", f"n{i}.md", b"text", store, provider)
 
     await ingest_upload("alice", "n0.md", b"new version", store, provider)  # same name: replaces
-    with pytest.raises(UploadError, match="up to 10 uploads"):
+    with pytest.raises(UploadError, match="up to 10 private notes"):
         await ingest_upload("alice", "one-more.md", b"text", store, provider)
     await ingest_upload("bob", "one-more.md", b"text", store, provider)  # other sessions unaffected
 
@@ -141,6 +154,16 @@ async def test_agent_searches_are_scoped_to_the_session_it_serves(store):
     assert await found("bob") == {"shared-note"}
 
 
+async def test_expired_uploads_stop_showing_up_without_waiting_for_another_upload(store, monkeypatch):
+    provider = FakeProvider(turns=[])
+    await ingest_upload("alice", "cells.md", b"Mitochondria.", store, provider)
+    later = time.time() + UPLOAD_TTL_S + 60
+    monkeypatch.setattr(time, "time", lambda: later)
+
+    current_session.set("alice")
+    assert {c.doc_id for c in await retrieve("mitochondria", provider, store, k=5)} == {"shared-note"}
+
+
 # ---- the HTTP API ------------------------------------------------------------------
 
 
@@ -169,6 +192,15 @@ async def test_upload_list_delete_and_reset_through_the_api(api):
     assert len((await api.get("/notes", params={"session_id": "alice"})).json()["docs"]) == 2
     await api.post("/reset/alice")  # New session: uploads go
     assert len((await api.get("/notes", params={"session_id": "alice"})).json()["docs"]) == 1
+
+
+async def test_the_notes_list_drops_expired_uploads(api, monkeypatch):
+    await api.post("/notes/upload", data={"session_id": "alice"}, files={"file": ("cells.md", b"Mitochondria.")})
+    later = time.time() + UPLOAD_TTL_S + 60
+    monkeypatch.setattr(time, "time", lambda: later)
+
+    docs = (await api.get("/notes", params={"session_id": "alice"})).json()["docs"]
+    assert [d["doc_id"] for d in docs] == ["shared-note"]
 
 
 async def test_upload_errors_come_back_as_400_with_the_reason(api):

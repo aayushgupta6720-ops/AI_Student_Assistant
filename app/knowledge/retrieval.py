@@ -5,6 +5,7 @@ from functools import lru_cache
 from app.config import get_settings
 from app.inference.provider import LLMProvider
 from app.knowledge.store import VectorStore
+from app.knowledge.uploads import UPLOAD_TTL_S
 from app.observability import time_step
 
 
@@ -41,5 +42,6 @@ async def retrieve(
     with time_step("inference", "embed_query"):
         [query_vec] = await provider.embed([query], "query")
     with time_step("knowledge", "vector_search", k=k):
+        store.purge_uploads(UPLOAD_TTL_S)  # so expired uploads stop showing up on time
         hits = store.search(query_vec, k, owner=current_session.get())
     return [RetrievedChunk(h.doc_id, h.text, round(h.score, 4)) for h in hits]

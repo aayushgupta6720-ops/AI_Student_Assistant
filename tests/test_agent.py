@@ -1,6 +1,8 @@
 from app.inference.types import Message, TextDelta, ToolCall, ToolCallPart, ToolResultPart
 from app.intelligence.agent import Agent, AgentDone, AgentToken, AgentToolCall, AgentToolResult
 from app.intelligence.memory import SessionStore
+from app.knowledge.store import VectorStore
+from app.tools.builtin import build_registry
 from app.tools.registry import Tool, ToolRegistry
 from tests.fake_provider import FakeProvider, text_turn, tool_turn
 
@@ -66,3 +68,24 @@ def test_memory_trim_never_orphans_tool_results():
     mem.append("s", Message("user"), Message("assistant", [ToolCallPart("1", "t", {})]),
                Message("tool", [ToolResultPart("1", "t", {})]), Message("assistant"), Message("user"))
     assert [m.role for m in mem.history("s")] == ["user"]
+
+
+def test_memory_forgets_the_least_recently_used_session_past_the_cap():
+    mem = SessionStore(max_sessions=2)
+    mem.append("a", Message("user"))
+    mem.append("b", Message("user"))
+    mem.append("a", Message("user"))  # a is now the most recent
+    mem.append("c", Message("user"))
+
+    assert [len(mem.history(s)) for s in ("a", "b", "c")] == [2, 0, 1]
+    assert mem.history("never-seen") == [] and len(mem._sessions) == 2  # reading doesn't add a session
+
+
+async def test_the_turns_time_zone_reaches_current_datetime():
+    provider = FakeProvider([tool_turn("current_datetime", {}), text_turn("ok")])
+    agent = Agent(provider, build_registry(provider, VectorStore(":memory:")), SessionStore())
+
+    events = [e async for e in agent.run_turn("s", "what time is it?", timezone="Asia/Kolkata")]
+
+    [result] = [e for e in events if isinstance(e, AgentToolResult)]
+    assert result.result["timezone"] == "Asia/Kolkata" and result.result["iso"].endswith("+05:30")

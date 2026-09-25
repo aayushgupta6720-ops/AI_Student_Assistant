@@ -16,9 +16,10 @@ one-way dependency direction, and every request produces a trace showing
 which layers ran and for how long.
 
 Domain: a personal study-notes assistant. It searches a folder of shared
-markdown notes plus notes you upload (`.md`, `.txt` or `.pdf`), which are
-**private to your chat session**. Another visitor's searches never see them,
-and they're deleted on *New session* or after 24 hours.
+markdown notes plus your own notes, uploaded (`.md`, `.txt` or `.pdf`) or
+saved from the chat, which are **private to your chat session**. Another
+visitor's searches never see them, and they're deleted on *New session* or
+after 24 hours.
 Stack: Python 3.12, FastAPI, Gemini (`google-genai`), SQLite + numpy, vanilla JS.
 
 ## The five layers
@@ -103,7 +104,7 @@ Open <http://localhost:8000>. Try the suggestions in the sidebar:
 - *What's on my reading list?* → `search_notes`, answer cites `reading-list`
 - *How is this assistant built?* → the notes include a description of this very architecture
 - *What is 17% of 2,340?* → `calculator`, no knowledge lookup
-- *Save a note titled Groceries: milk, eggs, coffee* → `save_note` writes the file and indexes it
+- *Save a note titled Groceries: milk, eggs, coffee* → `save_note` stores it as a private note for this chat
 - *What did I just save?* → session memory + `search_notes` finds the new note
 - *Hi* → no tools at all
 
@@ -114,16 +115,31 @@ curl -N -X POST localhost:8000/chat -H 'Content-Type: application/json' \
   -d '{"session_id":"cli","message":"What is on my reading list?"}'
 ```
 
-Other endpoints: `GET /health`, `GET /notes?session_id=…` (shared notes plus
-that session's uploads), `POST /notes/upload` (multipart `session_id` + `file`;
-2 MB and 10 uploads per session), `DELETE /notes/{doc_id}?session_id=…`,
-`POST /ingest`, `POST /reset/{session_id}` (also deletes the session's uploads
-unless `?keep_uploads=true`), `GET /docs`.
+`/chat` also takes an optional `timezone` (an IANA name like `Asia/Kolkata`)
+for `current_datetime` to answer in; the web client sends the browser's.
+Without one it uses the server's zone, which on Render is UTC.
 
-How uploads stay private: every stored chunk has an owner, either `""` for the
-shared notes or the uploading session's id. `search()` masks out other owners'
-rows, and the agent sets a `current_session` context variable each turn, so
-`search_notes` is scoped without passing a session id through every tool.
+Other endpoints: `GET /health`, `GET /notes?session_id=…` (shared notes plus
+that session's private notes), `POST /notes/upload` (multipart `session_id` +
+`file`; up to 2 MB and 200,000 characters of text), `DELETE /notes/{doc_id}?session_id=…`,
+`POST /ingest`, `POST /reset/{session_id}` (also deletes the session's private
+notes unless `?keep_uploads=true`), `GET /docs`. A session can have 10 private
+notes at a time, uploads and saved notes together.
+
+How private notes stay private: every stored chunk has an owner, either `""`
+for the shared notes or the session id that uploaded or saved it. `search()`
+masks out other owners' rows, and the agent sets a `current_session` context
+variable each turn, so `search_notes` and `save_note` are scoped without
+passing a session id through every tool. `save_note` never writes to
+`data/notes/`: that folder is the same for every visitor.
+
+What the tools refuse: `fetch_url` only fetches public http(s) addresses (not
+localhost, private networks or cloud metadata endpoints), checks every
+redirect, reads at most 2 MB, and gives up after 20 s. `calculator` refuses
+results over about 1,200 digits, since it runs on the event loop and a
+`9**9**9` would stall every chat. Answers are rendered as markdown through
+DOMPurify with only markdown's own tags allowed, so HTML that the model
+repeats from a web page or note can't run script or load images.
 
 ### Model choice and free-tier quotas
 
@@ -152,10 +168,10 @@ when prompted (it's marked `sync: false` so it never lives in the repo).
 Render's filesystem is ephemeral, so the app re-ingests `data/notes/*.md`
 on startup whenever the index is empty. If that fails (a Gemini quota 429,
 a bad key), the app still boots and logs `startup_ingest_failed`; chat works
-but `search_notes` finds nothing until `POST /ingest` succeeds. Notes created with `save_note`
-persist only until the next deploy or restart; attach a persistent disk
-(paid) if you need them to survive. The free plan sleeps after inactivity,
-so the first request after a while takes ~30–60 s.
+but `search_notes` finds nothing until `POST /ingest` succeeds. Private
+notes (uploads and `save_note`) live in the same index, so a deploy or
+restart also clears them. The free plan sleeps after inactivity, so the
+first request after a while takes ~30–60 s.
 
 ## Tests
 
@@ -166,7 +182,8 @@ pytest
 Everything runs offline against `tests/fake_provider.py`, a scripted
 `LLMProvider`: the layering rule, chunking, the vector store, the tool
 registry, and the agent loop (tool call → result fed back → final answer,
-memory persistence, max-iteration guard).
+memory persistence, max-iteration guard). `fetch_url` is tested against
+local HTTP servers: private addresses, redirects, huge and slow pages.
 
 ## How to swap a layer
 
