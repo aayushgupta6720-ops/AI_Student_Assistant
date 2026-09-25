@@ -5,6 +5,8 @@ import pytest
 
 import app.knowledge.uploads as uploads
 import app.main as main
+from app.api.ratelimit import build_rate_limiters
+from app.config import get_settings
 from app.intelligence.agent import Agent
 from app.intelligence.memory import SessionStore
 from app.knowledge.ingest import ingest_dir
@@ -169,7 +171,9 @@ async def test_expired_uploads_stop_showing_up_without_waiting_for_another_uploa
 
 @pytest.fixture
 async def api(store, monkeypatch):
-    for name, value in {"store": store, "provider": FakeProvider(turns=[]), "memory": SessionStore()}.items():
+    state = {"store": store, "provider": FakeProvider(turns=[]), "memory": SessionStore(),
+             "rate_limiters": build_rate_limiters(get_settings())}
+    for name, value in state.items():
         monkeypatch.setattr(main.app.state, name, value, raising=False)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
         yield client

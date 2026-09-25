@@ -141,6 +141,25 @@ results over about 1,200 digits, since it runs on the event loop and a
 DOMPurify with only markdown's own tags allowed, so HTML that the model
 repeats from a web page or note can't run script or load images.
 
+### Per-visitor rate limits
+
+The free-tier quota is shared by everyone using the app, so each visitor
+(an IP address; for IPv6, its /64) gets its own allowance: 6 chat messages a
+minute and 30 a day, 10 uploads an hour and 3 re-ingests an hour. Over a
+limit, the endpoint returns a 429 with a `Retry-After` header, and the chat
+says how long to wait. The model isn't called for a refused request. Change
+the numbers with `CHAT_LIMIT_PER_MINUTE`, `CHAT_LIMIT_PER_DAY`,
+`UPLOAD_LIMIT_PER_HOUR` and `INGEST_LIMIT_PER_HOUR`; 0 turns one off. Counts
+are in memory, which suits the single instance of Render's free plan, and
+reset on restart. Visitors sharing an IP, like a classroom behind one
+router, share one allowance.
+
+Behind a proxy, the connecting address is the proxy's, so `CLIENT_IP_HEADER`
+names the header that carries the visitor's IP. Only use a header that the
+proxy *overwrites* when a client sends it; `X-Forwarded-For` is appended to,
+so its first entry is whatever the visitor chose. `render.yaml` sets
+`CF-Connecting-IP`, which Cloudflare (in front of Render) sets itself.
+
 ### Model choice and free-tier quotas
 
 Default is `gemini-3.5-flash-lite` (set `GENERATION_MODEL` in `.env`), which
@@ -172,6 +191,25 @@ but `search_notes` finds nothing until `POST /ingest` succeeds. Private
 notes (uploads and `save_note`) live in the same index, so a deploy or
 restart also clears them. The free plan sleeps after inactivity, so the
 first request after a while takes ~30–60 s.
+
+To check the rate limit identifies visitors correctly after a deploy, send
+11 uploads that fail validation (so no quota is spent), each with made-up IP
+headers:
+
+```bash
+for i in $(seq 11); do curl -s -o /dev/null -w '%{http_code} ' \
+  -H "X-Forwarded-For: 10.9.9.$i" -H "CF-Connecting-IP: 10.9.9.$i" \
+  -F session_id=check -F 'file=@/dev/null;filename=x.exe' \
+  https://ai-student-assistant-hz02.onrender.com/notes/upload; done
+```
+
+Ten `400`s then a `429` means the made-up headers didn't count as new
+visitors. Run it against the deployed app, not localhost: uvicorn trusts
+`X-Forwarded-For` on connections from `127.0.0.1` by default
+(`--forwarded-allow-ips`), so requests from your own machine can pick their
+address and you'll see eleven `400`s. Then check the Render logs for `client_ip_header_missing`: if it
+appears, the header isn't reaching the app and all visitors share one
+allowance, so `CLIENT_IP_HEADER` needs changing.
 
 ## Tests
 

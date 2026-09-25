@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.ratelimit import build_rate_limiters
 from app.api.routes import router
 from app.config import PROJECT_ROOT, get_settings
 from app.inference.gemini import get_provider          # inference layer
@@ -54,6 +55,7 @@ async def lifespan(app: FastAPI):
     app.state.registry = registry
     app.state.memory = memory
     app.state.agent = Agent(provider, registry, memory)
+    app.state.rate_limiters = build_rate_limiters(settings)
     yield
 
 

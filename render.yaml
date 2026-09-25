@@ -13,3 +13,5 @@ services:
         sync: false          # Render prompts for this on first deploy; never stored in the repo
       - key: GENERATION_MODEL
         value: gemini-3.5-flash-lite
+      - key: CLIENT_IP_HEADER
+        value: CF-Connecting-IP   # Render sits behind Cloudflare, which sets this; rate limits key on it

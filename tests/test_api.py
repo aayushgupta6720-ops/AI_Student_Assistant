@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 import app.main as main
+from app.api.ratelimit import build_rate_limiters
+from app.config import get_settings
 from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
 
 
@@ -18,6 +20,7 @@ class QuotaAgent:
 
 async def _chat_events(monkeypatch, agent) -> list[tuple[str, dict]]:
     monkeypatch.setattr(main.app.state, "agent", agent, raising=False)
+    monkeypatch.setattr(main.app.state, "rate_limiters", build_rate_limiters(get_settings()), raising=False)
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/chat", json={"session_id": "s", "message": "hi"})

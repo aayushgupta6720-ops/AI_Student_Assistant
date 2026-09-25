@@ -32,6 +32,18 @@ class Settings(BaseSettings):
     memory_window_messages: int = 20
     max_sessions: int = 1000  # conversations kept in memory; least recently used go first
 
+    # Per-visitor limits (see app/api/ratelimit.py) so one visitor can't use
+    # up the shared daily Gemini quota. 0 turns a limit off.
+    chat_limit_per_minute: int = 6
+    chat_limit_per_day: int = 30
+    upload_limit_per_hour: int = 10
+    ingest_limit_per_hour: int = 3
+    # A header holding the visitor's IP, set by a proxy in front of the app
+    # that overwrites any client-sent copy (behind Cloudflare, as on Render:
+    # CF-Connecting-IP). Unset means the connecting address, right when
+    # nothing sits in front. Never X-Forwarded-For: visitors can forge it.
+    client_ip_header: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8"
     )

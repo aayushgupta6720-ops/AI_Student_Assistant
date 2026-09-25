@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.api.ratelimit import rate_limit
 from app.config import get_settings
 from app.intelligence.agent import (
     Agent,
@@ -80,7 +81,7 @@ async def notes(request: Request, session_id: str | None = Query(default=None, m
     return {"docs": store.list_docs(owner=session_id)}
 
 
-@router.post("/notes/upload")
+@router.post("/notes/upload", dependencies=[rate_limit("upload")])
 async def upload_note(
     request: Request,
     session_id: str = Form(min_length=1, max_length=64),
@@ -110,7 +111,7 @@ async def delete_note(doc_id: str, request: Request, session_id: str = Query(min
     return {"deleted": request.app.state.store.delete_doc(doc_id, owner=session_id)}
 
 
-@router.post("/ingest")
+@router.post("/ingest", dependencies=[rate_limit("ingest")])
 async def ingest(request: Request) -> dict:
     settings = get_settings()
     counts = await ingest_dir(settings.notes_dir, request.app.state.store, request.app.state.provider)
@@ -128,7 +129,7 @@ async def reset(session_id: str, request: Request, keep_uploads: bool = False) -
     return {"reset": session_id}
 
 
-@router.post("/chat")
+@router.post("/chat", dependencies=[rate_limit("chat")])
 async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
     agent: Agent = request.app.state.agent
 

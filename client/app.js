@@ -19,9 +19,15 @@ const $ = (s) => document.querySelector(s);
 const messages = $("#messages"), input = $("#input"), sendBtn = $("#send");
 const LAYERS = ["intelligence", "inference", "knowledge", "tools"];
 
+// The server's own explanation (e.g. a rate limit's "try again in 40 seconds"), else the status.
+async function errorText(res) {
+  const body = await res.json().catch(() => ({}));
+  return typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`;
+}
+
 async function getJSON(url, options) {
   const res = await fetch(url, options);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error(await errorText(res));
   return res.json();
 }
 
@@ -115,7 +121,7 @@ async function chat(text) {
   sendBtn.disabled = true;
   try {
     const res = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId, message: text, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(await errorText(res));
     const reader = res.body.getReader(), dec = new TextDecoder();
     let buf = "";
     for (;;) {
@@ -177,8 +183,8 @@ $("#upload-input").addEventListener("change", async (e) => {
     form.append("session_id", sessionId);
     form.append("file", file);
     const res = await fetch("/notes/upload", { method: "POST", body: form });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await errorText(res));
+    const body = await res.json();
     showNoteStatus(`Added ${body.doc_id} (${body.chunks} chunk${body.chunks === 1 ? "" : "s"}), private to this chat`, true);
   } catch (err) {
     showNoteStatus(`Upload failed: ${err.message}`, false);
