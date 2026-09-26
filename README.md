@@ -95,7 +95,7 @@ per-layer totals don't double count (`tools.search_notes` wraps
 python3.12 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # put your GEMINI_API_KEY in .env
-python -m scripts.ingest    # sync data/notes/*.md into data/knowledge.sqlite (deleted notes are dropped)
+python -m scripts.ingest    # sync data/notes/*.md into data/knowledge.sqlite (unchanged notes skipped, deleted ones dropped)
 uvicorn app.main:app --reload
 ```
 
@@ -122,7 +122,9 @@ Without one it uses the server's zone, which on Render is UTC.
 Other endpoints: `GET /health`, `GET /notes?session_id=…` (shared notes plus
 that session's private notes), `POST /notes/upload` (multipart `session_id` +
 `file`; up to 2 MB and 200,000 characters of text), `DELETE /notes/{doc_id}?session_id=…`,
-`POST /ingest`, `POST /reset/{session_id}` (also deletes the session's private
+`POST /ingest` (embeds only new and changed notes: a note whose stored chunks
+match its text and the current embedding model is skipped, so the button costs
+no quota when nothing changed), `POST /reset/{session_id}` (also deletes the session's private
 notes unless `?keep_uploads=true`), `GET /docs`. A session can have 10 private
 notes at a time, uploads and saved notes together. The whole app keeps at most
 10,000 private chunks (`MAX_PRIVATE_CHUNKS`), since search holds them all in

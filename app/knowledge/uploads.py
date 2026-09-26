@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Callable
 
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
 
 from app.config import get_settings
 from app.inference.provider import LLMProvider
@@ -52,7 +51,9 @@ def extract_text(filename: str, data: bytes) -> str:
                 length += len(pages[-1])
                 if length > MAX_UPLOAD_CHARS:
                     break  # already too long; don't extract the rest
-        except (PdfReadError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - pypdf raises all sorts on a broken file
+            # Not just pypdf's PdfReadError: a PDF naming an /Encrypt object it
+            # doesn't have raised AttributeError, which came back as a 500.
             raise UploadError("That PDF couldn't be read.") from exc
         text = "\n\n".join(pages)
         if not text.strip():

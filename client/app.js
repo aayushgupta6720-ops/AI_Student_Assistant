@@ -134,7 +134,7 @@ async function chat(text) {
     const res = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId, message: text, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
     if (!res.ok) throw new Error(await errorText(res));
     const reader = res.body.getReader(), dec = new TextDecoder();
-    let buf = "";
+    let buf = "", finished = false;
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -148,8 +148,12 @@ async function chat(text) {
           else if (line.startsWith("data: ")) data += line.slice(6);
         }
         if (handlers[event]) handlers[event](view, JSON.parse(data));
+        if (event === "done" || event === "error") finished = true;
       }
     }
+    // A dropped connection or a restarting server ends the stream with no
+    // done or error event; without this the cursor just kept blinking.
+    if (!finished) handlers.error(view, { message: "The connection closed before the answer finished. Try sending your message again." });
   } catch (e) {
     handlers.error(view, { message: e.message });
   } finally {
@@ -174,7 +178,18 @@ document.addEventListener("keydown", (e) => {
 });
 
 document.querySelectorAll(".suggestions button").forEach(b => b.addEventListener("click", () => { setDrawer(false); chat(b.textContent.trim()); }));
-$("#newsession").addEventListener("click", async () => { setDrawer(false); await fetch(`/reset/${sessionId}`, { method: "POST" }); messages.innerHTML = ""; });
+$("#newsession").addEventListener("click", async () => {
+  setDrawer(false);
+  try {
+    await getJSON(`/reset/${encodeURIComponent(sessionId)}`, { method: "POST" });
+  } catch (err) {
+    showNoteStatus(`Couldn't start a new session (${err.message})`, false);
+    return;
+  }
+  messages.innerHTML = "";
+  $("#ingest-status").textContent = "";
+  await loadSidebar();  // the reset deleted this chat's private notes; stop listing them
+});
 $("#status-retry").addEventListener("click", loadSidebar);
 
 function showNoteStatus(text, ok) {
@@ -211,8 +226,9 @@ $("#notes").addEventListener("click", async (e) => {
   if (!btn) return;
   btn.disabled = true;
   try {
-    await getJSON(`/notes/${encodeURIComponent(btn.dataset.doc)}?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-    showNoteStatus(`Removed ${btn.dataset.doc}`, true);
+    const r = await getJSON(`/notes/${encodeURIComponent(btn.dataset.doc)}?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    // Not there any more, e.g. expired after 24 hours, or removed in another tab.
+    showNoteStatus(r.deleted ? `Removed ${btn.dataset.doc}` : `${btn.dataset.doc} had already been removed`, true);
   } catch (err) {
     showNoteStatus(`Couldn't remove it (${err.message})`, false);
   }

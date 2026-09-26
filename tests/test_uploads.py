@@ -67,6 +67,8 @@ def test_extracts_markdown_text_and_pdf():
         ("blank.md", b"  \n\n ", "empty"),
         ("scan.pdf", _pdf(None), "Scanned PDFs"),
         ("broken.pdf", b"%PDF-1.4 not really", "couldn't be read"),
+        # pypdf raises AttributeError here, not PdfReadError: it used to be a 500
+        ("no-key.pdf", _pdf("x").replace(b"/Root", b"/Encrypt 99 0 R /Root"), "couldn't be read"),
         ("long.md", b"x" * (MAX_UPLOAD_CHARS + 1), "over 200,000 characters"),
     ],
 )

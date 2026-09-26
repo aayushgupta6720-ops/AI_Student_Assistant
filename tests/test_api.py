@@ -62,6 +62,18 @@ async def test_overloaded_model_says_it_is_temporary(monkeypatch):
     assert "UNAVAILABLE" not in data["message"]
 
 
+async def test_an_unexpected_error_shows_a_plain_message_not_the_exception(monkeypatch):
+    # The chat used to show "ClientError: 400 INVALID_ARGUMENT. {...}", the
+    # provider's whole error body.
+    error = RuntimeError("400 INVALID_ARGUMENT. {'error': {'message': 'Invalid JSON payload received.'}}")
+
+    [(event, data)] = await _chat_events(monkeypatch, QuotaAgent(error))
+
+    assert event == "error" and data["kind"] == "internal"
+    assert "Something went wrong" in data["message"]
+    assert "INVALID_ARGUMENT" not in data["message"] and "RuntimeError" not in data["message"]
+
+
 async def test_timeout_says_the_request_was_stopped(monkeypatch):
     [(event, data)] = await _chat_events(monkeypatch, QuotaAgent(ModelTimeoutError("no response from Gemini within 60s")))
 
