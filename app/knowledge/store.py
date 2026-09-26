@@ -17,7 +17,7 @@ SHARED = ""
 # Bumped when the table layout changes. The store only holds derived data
 # (re-ingestable from data/notes), so an older layout is dropped rather than
 # migrated, and startup re-ingests the now-empty store.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -44,6 +44,9 @@ class VectorStore:
                    text TEXT NOT NULL,
                    embedding BLOB NOT NULL,
                    created_at REAL NOT NULL,
+                   -- The embedding model and size that made `embedding`, so a
+                   -- re-ingest can skip a note whose chunks are already current.
+                   embedded_with TEXT NOT NULL,
                    PRIMARY KEY (owner, doc_id, chunk_index)
                )"""
         )
@@ -51,7 +54,12 @@ class VectorStore:
         self._cache: tuple[np.ndarray, list[StoredChunk], list[str]] | None = None
 
     def upsert_doc(
-        self, doc_id: str, texts: list[str], embeddings: list[list[float]], owner: str | None = None
+        self,
+        doc_id: str,
+        texts: list[str],
+        embeddings: list[list[float]],
+        owner: str | None = None,
+        embedded_with: str = "",
     ) -> None:
         assert len(texts) == len(embeddings)
         owner = owner or SHARED
@@ -59,13 +67,22 @@ class VectorStore:
         with self._conn:
             self._conn.execute("DELETE FROM chunks WHERE owner = ? AND doc_id = ?", (owner, doc_id))
             self._conn.executemany(
-                "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (owner, doc_id, i, text, np.asarray(vec, dtype=np.float32).tobytes(), now)
+                    (owner, doc_id, i, text, np.asarray(vec, dtype=np.float32).tobytes(), now, embedded_with)
                     for i, (text, vec) in enumerate(zip(texts, embeddings))
                 ],
             )
         self._cache = None
+
+    def is_current(self, doc_id: str, texts: list[str], embedded_with: str, owner: str | None = None) -> bool:
+        """Whether `owner`'s doc is stored as exactly `texts`, embedded with
+        `embedded_with`: then embedding it again would change nothing."""
+        rows = self._conn.execute(
+            "SELECT text, embedded_with FROM chunks WHERE owner = ? AND doc_id = ? ORDER BY chunk_index",
+            (owner or SHARED, doc_id),
+        ).fetchall()
+        return [t for t, _ in rows] == texts and all(e == embedded_with for _, e in rows)
 
     def delete_doc(self, doc_id: str, owner: str | None = None) -> bool:
         """Delete one doc of `owner` (the shared notes when None). Returns

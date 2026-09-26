@@ -128,7 +128,14 @@ async def delete_note(doc_id: str, request: Request, session_id: str = Query(min
 @router.post("/ingest", dependencies=[rate_limit("ingest")])
 async def ingest(request: Request) -> dict:
     settings = get_settings()
-    counts = await ingest_dir(settings.notes_dir, request.app.state.store, request.app.state.provider)
+    try:
+        counts = await ingest_dir(settings.notes_dir, request.app.state.store, request.app.state.provider)
+    except (QuotaExceededError, ModelOverloadedError, ModelTimeoutError) as exc:
+        # Notes embedded before the failure stay updated; the rest keep their old chunks.
+        log_event(event="ingest_failed", error=str(exc))
+        raise HTTPException(
+            status_code=503, detail="The embedding model is unavailable right now, so the notes couldn't be re-indexed. Try again later."
+        ) from exc
     return {"ingested": counts, "chunks_indexed": request.app.state.store.count()}
 
 
@@ -203,8 +210,14 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
                 "resets_at": None,
             })
         except Exception as exc:  # noqa: BLE001 - report to the client instead of a dead stream
+            # The details stay in the log: an exception's text can be a whole
+            # provider error body, which means nothing to the person chatting.
             log_event(event="chat_error", session_id=body.session_id, error=repr(exc))
-            yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"})
+            yield _sse("error", {
+                "kind": "internal",
+                "message": "Something went wrong on the server while answering. Try again in a moment.",
+                "resets_at": None,
+            })
 
     return StreamingResponse(
         stream(),

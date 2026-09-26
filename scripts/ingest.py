@@ -1,6 +1,6 @@
-"""CLI: sync the vector store with the markdown notes in data/notes: every
-note is re-chunked and re-embedded, and notes deleted from the folder are
-dropped from the store.
+"""CLI: sync the vector store with the markdown notes in data/notes: new and
+changed notes are embedded (unchanged ones are skipped), and notes deleted
+from the folder are dropped from the store.
 
     python -m scripts.ingest
 """
