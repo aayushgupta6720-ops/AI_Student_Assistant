@@ -37,11 +37,17 @@ async def retrieve(
     store: VectorStore | None = None,
     k: int | None = None,
 ) -> list[RetrievedChunk]:
+    settings = get_settings()
     store = store or get_store()
-    k = k or get_settings().retrieval_top_k
+    k = k or settings.retrieval_top_k
     with time_step("inference", "embed_query"):
         [query_vec] = await provider.embed([query], "query")
     with time_step("knowledge", "vector_search", k=k):
         store.purge_uploads(UPLOAD_TTL_S)  # so expired uploads stop showing up on time
         hits = store.search(query_vec, k, owner=current_session.get())
+    # Relative, not an absolute cutoff: a terse query's right answer can score
+    # as low as an unrelated note does for another query, but it still leads.
+    if hits:
+        floor = hits[0].score - settings.retrieval_score_margin
+        hits = [h for h in hits if h.score >= floor]
     return [RetrievedChunk(h.doc_id, h.text, round(h.score, 4)) for h in hits]

@@ -28,7 +28,7 @@ from app.inference.types import (
 )
 from app.intelligence.memory import SessionStore
 from app.knowledge.retrieval import current_session
-from app.intelligence.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
+from app.intelligence.prompts import FINAL_CALL_NOTE, SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
 from app.observability import CallTrace, start_trace, time_step
 from app.tools.builtin import user_timezone
 from app.tools.registry import ToolRegistry
@@ -105,6 +105,9 @@ class Agent:
 
         while iterations < self.max_iterations:
             iterations += 1
+            # The last call gets no tools, so the model has to answer with what
+            # it has instead of asking for results the turn would never read.
+            final = iterations == self.max_iterations
             yield AgentStatus("thinking", iterations)
 
             # -- 1. ask the model (inference layer) ------------------------------
@@ -112,14 +115,14 @@ class Agent:
             tool_calls: list[ToolCall] = []
             with time_step("inference", "generate", iteration=iterations) as usage:
                 async for event in self.provider.stream_generate(
-                    system=self.system_prompt,
+                    system=self.system_prompt + (FINAL_CALL_NOTE if final else ""),
                     messages=self.memory.history(session_id),
-                    tools=self.registry.specs(),
+                    tools=[] if final else self.registry.specs(),
                 ):
                     if isinstance(event, TextDelta):
                         text_parts.append(TextPart(event.text, event.provider_state))
                         yield AgentToken(event.text)
-                    elif isinstance(event, ToolCall):
+                    elif isinstance(event, ToolCall) and not final:  # none offered on the last call
                         tool_calls.append(event)
                     elif isinstance(event, Usage):
                         usage["input_tokens"] = event.input_tokens

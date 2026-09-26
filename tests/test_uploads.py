@@ -132,7 +132,14 @@ async def test_reingesting_shared_notes_never_prunes_uploads(tmp_path, store):
 # ---- session scoping of search ---------------------------------------------------------
 
 
-async def test_retrieve_only_sees_the_current_sessions_uploads(store):
+@pytest.fixture
+def every_match(monkeypatch):
+    """Keep weak matches too: these tests are about which notes a session can
+    see, and the fake embeddings score the shared note far below the upload."""
+    monkeypatch.setattr(get_settings(), "retrieval_score_margin", 2.0)  # cosine scores span 2
+
+
+async def test_retrieve_only_sees_the_current_sessions_uploads(store, every_match):
     provider = FakeProvider(turns=[])
     await ingest_upload("alice", "cells.md", b"Mitochondria.", store, provider)
 
@@ -142,7 +149,7 @@ async def test_retrieve_only_sees_the_current_sessions_uploads(store):
     assert {c.doc_id for c in await retrieve("mitochondria", provider, store, k=5)} == {"shared-note", "cells"}
 
 
-async def test_agent_searches_are_scoped_to_the_session_it_serves(store):
+async def test_agent_searches_are_scoped_to_the_session_it_serves(store, every_match):
     provider = FakeProvider([tool_turn("search_notes", {"query": "mitochondria"}), text_turn("ok")] * 2)
     await ingest_upload("alice", "cells.md", b"Mitochondria.", store, provider)
     agent = Agent(provider, build_registry(provider, store), SessionStore())
@@ -205,6 +212,44 @@ async def test_the_notes_list_drops_expired_uploads(api, monkeypatch):
 
     docs = (await api.get("/notes", params={"session_id": "alice"})).json()["docs"]
     assert [d["doc_id"] for d in docs] == ["shared-note"]
+
+
+TWO_CHUNKS = (("a " * 300).strip() + "\n\n" + ("b " * 300).strip()).encode()
+
+
+async def _upload(api, session: str, name: str, data: bytes) -> httpx.Response:
+    return await api.post("/notes/upload", data={"session_id": session}, files={"file": (name, data)})
+
+
+async def test_uploads_count_their_chunks_against_a_daily_budget(api, monkeypatch):
+    # Counting files alone let one visitor, switching sessions, upload ~500
+    # chunks at a time all day: more memory than a free instance has.
+    settings = get_settings()
+    monkeypatch.setattr(settings, "upload_chunk_limit_per_day", 3)
+    monkeypatch.setattr(main.app.state, "rate_limiters", build_rate_limiters(settings))
+
+    assert (await _upload(api, "alice", "big.md", TWO_CHUNKS)).json() == {"doc_id": "big", "chunks": 2}
+    refused = await _upload(api, "new-session", "big2.md", TWO_CHUNKS)
+
+    assert refused.status_code == 429 and int(refused.headers["Retry-After"]) == 24 * 3600
+    assert refused.json()["detail"] == (
+        "That's 2 note chunks, which would take you over the limit of 3 note chunks a day. Try again in 24 hours."
+    )
+    assert [d["doc_id"] for d in (await api.get("/notes", params={"session_id": "new-session"})).json()["docs"]] == [
+        "shared-note"
+    ]  # refused before anything was embedded or stored
+    assert (await _upload(api, "new-session", "small.md", b"tiny")).status_code == 200  # 1 more still fits
+
+
+async def test_private_notes_stop_at_the_apps_memory_cap_across_all_sessions(api, monkeypatch):
+    monkeypatch.setattr(get_settings(), "max_private_chunks", 3)
+    assert (await _upload(api, "alice", "big.md", TWO_CHUNKS)).status_code == 200
+    assert (await _upload(api, "bob", "small.md", b"tiny")).status_code == 200
+
+    full = await _upload(api, "carol", "small.md", b"tiny")
+
+    assert full.status_code == 503 and "as many private notes as it has room for" in full.json()["detail"]
+    assert (await _upload(api, "alice", "big.md", b"now one chunk")).status_code == 200  # replacing frees its chunks
 
 
 async def test_upload_errors_come_back_as_400_with_the_reason(api):

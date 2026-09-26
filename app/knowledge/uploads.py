@@ -6,10 +6,12 @@ session, or after UPLOAD_TTL_S, whichever comes first."""
 import asyncio
 import io
 from pathlib import Path
+from typing import Callable
 
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
+from app.config import get_settings
 from app.inference.provider import LLMProvider
 from app.knowledge.ingest import chunk_note, slugify
 from app.knowledge.store import VectorStore
@@ -27,6 +29,11 @@ ALLOWED_SUFFIXES = (".md", ".txt", ".pdf")
 
 class UploadError(ValueError):
     """An upload we refuse, with a message fit to show the user."""
+
+
+class PrivateNotesFullError(UploadError):
+    """The app holds as many private notes as it has memory for. Nothing is
+    wrong with the upload; it can work once older notes expire."""
 
 
 def extract_text(filename: str, data: bytes) -> str:
@@ -76,15 +83,22 @@ def as_note(filename: str, text: str) -> tuple[str, str]:
 
 
 async def store_private_note(
-    session_id: str | None, doc_id: str, text: str, store: VectorStore, provider: LLMProvider
+    session_id: str | None,
+    doc_id: str,
+    text: str,
+    store: VectorStore,
+    provider: LLMProvider,
+    charge: Callable[[int], None] | None = None,
 ) -> dict:
     """Chunk, embed and store `text` as one of `session_id`'s private notes.
-    Storing a doc_id the session already has replaces that note."""
+    Storing a doc_id the session already has replaces that note. `charge` is
+    called with the chunk count once the note is accepted, before anything is
+    embedded, and may raise to refuse it (the API's per-visitor budget)."""
     if not session_id:
         raise UploadError("Private notes need a session.")
 
     store.purge_uploads(UPLOAD_TTL_S)
-    own = {d["doc_id"] for d in store.list_docs(owner=session_id) if d["uploaded"]}
+    own = {d["doc_id"]: d["chunks"] for d in store.list_docs(owner=session_id) if d["uploaded"]}
     if doc_id not in own and len(own) >= MAX_UPLOADS_PER_SESSION:
         raise UploadError(
             f"You can have up to {MAX_UPLOADS_PER_SESSION} private notes per chat "
@@ -92,6 +106,15 @@ async def store_private_note(
         )
 
     chunks = chunk_note(text)
+    # A visitor can start any number of sessions, so the per-session cap
+    # doesn't bound memory; this one does. Replacing a note frees its chunks.
+    if store.private_count() - own.get(doc_id, 0) + len(chunks) > get_settings().max_private_chunks:
+        raise PrivateNotesFullError(
+            "The assistant is holding as many private notes as it has room for. "
+            "Try again later, once older notes have expired."
+        )
+    if charge is not None:
+        charge(len(chunks))
     with time_step("inference", "embed_documents", doc_id=doc_id, chunks=len(chunks)):
         embeddings = await provider.embed(chunks, "document")
     with time_step("knowledge", "store_upsert", doc_id=doc_id):
@@ -100,7 +123,12 @@ async def store_private_note(
 
 
 async def ingest_upload(
-    session_id: str, filename: str, data: bytes, store: VectorStore, provider: LLMProvider
+    session_id: str,
+    filename: str,
+    data: bytes,
+    store: VectorStore,
+    provider: LLMProvider,
+    charge: Callable[[int], None] | None = None,
 ) -> dict:
     """Store an uploaded file as one of `session_id`'s private notes.
     Re-uploading a file with the same name replaces the earlier version."""
@@ -109,4 +137,4 @@ async def ingest_upload(
     # PDF parsing is CPU-bound: off the event loop, so other chats keep streaming.
     text = await asyncio.to_thread(extract_text, filename, data)
     doc_id, text = as_note(filename, text)
-    return await store_private_note(session_id, doc_id, text, store, provider)
+    return await store_private_note(session_id, doc_id, text, store, provider, charge)

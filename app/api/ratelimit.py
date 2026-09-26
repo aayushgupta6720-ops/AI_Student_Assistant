@@ -27,8 +27,8 @@ class Limit:
 
 
 class RateLimiter:
-    """Sliding-window limits per key. A key keeps the times of its recent
-    requests, never more than its largest limit allows, and at most
+    """Sliding-window limits per key. A key keeps the times and costs of its
+    recent requests, never more than its largest limit allows, and at most
     max_keys keys are tracked (least recently seen dropped first), so memory
     stays bounded."""
 
@@ -43,27 +43,33 @@ class RateLimiter:
         self.limits = [limit for limit in limits if limit.count > 0]  # 0 turns one off
         self.max_keys = max_keys
         self._clock = clock
-        self._hits: OrderedDict[str, deque[float]] = OrderedDict()
+        self._hits: OrderedDict[str, deque[tuple[float, int]]] = OrderedDict()  # (time, cost)
 
-    def hit(self, key: str) -> tuple[Limit, float] | None:
-        """Count a request from `key`. If one of the limits is already
-        reached, count nothing and return that limit and the seconds until it
-        allows another request."""
+    def hit(self, key: str, cost: int = 1) -> tuple[Limit, float] | None:
+        """Count a request from `key` costing `cost` (1 per request, or e.g.
+        an upload's chunks). If it would take `key` over one of the limits,
+        count nothing and return that limit and the seconds until enough of
+        the earlier use has left the window for this request to fit."""
         if not self.limits:
             return None
         now = self._clock()
         hits = self._hits.pop(key, deque())
         longest = max(limit.window_s for limit in self.limits)
-        while hits and now - hits[0] >= longest:
+        while hits and now - hits[0][0] >= longest:
             hits.popleft()
         self._hits[key] = hits  # re-inserted last: the most recently seen key
 
         for limit in self.limits:
-            in_window = [t for t in hits if now - t < limit.window_s]
-            if len(in_window) >= limit.count:
-                return limit, in_window[-limit.count] + limit.window_s - now
+            in_window = [(t, c) for t, c in hits if now - t < limit.window_s]
+            used = sum(c for _, c in in_window)
+            if used + cost > limit.count:
+                for t, c in in_window:  # oldest first, as they leave the window
+                    used -= c
+                    if used + cost <= limit.count:
+                        return limit, t + limit.window_s - now
+                return limit, limit.window_s  # costs more than the limit allows at all
 
-        hits.append(now)
+        hits.append((now, cost))
         while len(self._hits) > self.max_keys:
             self._hits.popitem(last=False)
         return None
@@ -71,13 +77,15 @@ class RateLimiter:
 
 def build_rate_limiters(settings: Settings) -> dict[str, RateLimiter]:
     """One limiter per costly endpoint: a chat turn is 2-3 model calls, and an
-    upload or re-ingest is a few embedding calls."""
+    upload or re-ingest is a few embedding calls. An upload's chunks count
+    too, since one file can be ~500 chunks to embed and keep in memory."""
     return {
         "chat": RateLimiter("messages", [
             Limit(settings.chat_limit_per_minute, 60, "a minute"),
             Limit(settings.chat_limit_per_day, 24 * 3600, "a day"),
         ]),
         "upload": RateLimiter("uploads", [Limit(settings.upload_limit_per_hour, 3600, "an hour")]),
+        "upload_chunks": RateLimiter("note chunks", [Limit(settings.upload_chunk_limit_per_day, 24 * 3600, "a day")]),
         "ingest": RateLimiter("re-ingests", [Limit(settings.ingest_limit_per_hour, 3600, "an hour")]),
     }
 
@@ -124,24 +132,36 @@ def _duration(seconds: int) -> str:
     return f"{n} {unit}{'' if n == 1 else 's'}"
 
 
+def charge(request: Request, name: str, cost: int = 1) -> None:
+    """Count `cost` against this visitor's `name` limits, or refuse the
+    request with a 429 if that would take them over one."""
+    limiter: RateLimiter = request.app.state.rate_limiters[name]
+    key = client_key(request)
+    refused = limiter.hit(key, cost)
+    if refused is None:
+        return
+    limit, retry_after_s = refused
+    wait = max(1, math.ceil(retry_after_s))
+    log_event(event="rate_limited", limiter=name, client=key, cost=cost, retry_after_s=wait)
+    if cost == 1:
+        reason = f"You've reached the limit of {limit.count} {limiter.what} {limit.per}."
+    else:
+        reason = (
+            f"That's {cost:,} {limiter.what}, which would take you over the limit of "
+            f"{limit.count:,} {limiter.what} {limit.per}."
+        )
+    raise HTTPException(
+        status_code=429,
+        detail=f"{reason} Try again in {_duration(wait)}.",
+        headers={"Retry-After": str(wait)},
+    )
+
+
 def rate_limit(name: str):
     """A route dependency that refuses the request with a 429 once this
     visitor is over the `name` limits."""
 
     def check(request: Request) -> None:
-        limiter: RateLimiter = request.app.state.rate_limiters[name]
-        key = client_key(request)
-        refused = limiter.hit(key)
-        if refused is None:
-            return
-        limit, retry_after_s = refused
-        wait = max(1, math.ceil(retry_after_s))
-        log_event(event="rate_limited", limiter=name, client=key, retry_after_s=wait)
-        raise HTTPException(
-            status_code=429,
-            detail=f"You've reached the limit of {limit.count} {limiter.what} {limit.per}. "
-            f"Try again in {_duration(wait)}.",
-            headers={"Retry-After": str(wait)},
-        )
+        charge(request, name)
 
     return Depends(check)

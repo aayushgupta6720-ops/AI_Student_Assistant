@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -31,6 +32,30 @@ def test_calculator_refuses_huge_results_instead_of_stalling(expression):
     assert time.perf_counter() - started < 0.1
 
 
+@pytest.mark.parametrize(
+    ("expression", "message"),
+    [("(-8)**(1/3)", "isn't a real number"), ("(-4)**0.5", "isn't a real number"),
+     ("1e308*10", "too large"), ("-1e308*10", "too large"), ("1e999 - 1e999", "too large")],
+)
+def test_calculator_refuses_results_that_cant_go_back_to_the_model(expression, message):
+    # A complex result crashed the SDK's JSON encoding and inf went out as
+    # bare Infinity, which Gemini rejects; either stayed in the chat's history
+    # and broke every later message.
+    with pytest.raises(ValueError, match=message):
+        calculator(expression)
+
+
+@pytest.mark.parametrize("result", [{"x": float("nan")}, {"x": float("inf")}, {"x": 1j}])
+async def test_a_tool_result_that_cant_be_sent_to_the_model_becomes_an_error(result):
+    reg = ToolRegistry()
+    reg.register(Tool("odd", "returns odd numbers", {"type": "object", "properties": {}}, lambda: result))
+
+    out = await reg.execute("odd", {})
+
+    assert out.is_error
+    json.dumps(out.result, allow_nan=False)  # what goes into the history can be sent
+
+
 async def test_registry_specs_and_errors():
     reg = ToolRegistry()
     reg.register(Tool("boom", "explodes", {"type": "object", "properties": {}}, lambda: 1 / 0))
@@ -56,6 +81,23 @@ async def test_builtin_registry_search_and_save(tmp_path, monkeypatch):
 
     found = await reg.execute("search_notes", {"query": "milk eggs"})
     assert found.result["results"][0]["doc_id"] == "groceries"
+
+
+@pytest.mark.parametrize(("top_k", "count"), [(-2, 1), (0, 1), (3.0, 3), ("5", 5), (1000, 10)])
+async def test_search_notes_keeps_top_k_between_1_and_10(tmp_path, monkeypatch, top_k, count):
+    # -2 used to return all but the last two passages, 1000 every passage
+    # there was, and 3.0 an error.
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "retrieval_score_margin", 2.0)  # count passages, not relevance
+    store = VectorStore(tmp_path / "s.sqlite")
+    for i in range(15):
+        store.upsert_doc(f"doc{i}", [f"note {i}"], [[1.0, i, 0, 0]])
+    reg = build_registry(FakeProvider(turns=[]), store)
+
+    out = await reg.execute("search_notes", {"query": "note", "top_k": top_k})
+
+    assert not out.is_error and len(out.result["results"]) == count
 
 
 async def test_saved_notes_are_private_to_the_session_and_never_touch_shared_notes(tmp_path, monkeypatch):

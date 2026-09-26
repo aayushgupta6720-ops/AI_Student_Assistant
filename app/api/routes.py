@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.ratelimit import rate_limit
+from app.api.ratelimit import charge, rate_limit
 from app.config import get_settings
 from app.intelligence.agent import (
     Agent,
@@ -22,7 +22,13 @@ from app.intelligence.agent import (
 )
 from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
 from app.knowledge.ingest import ingest_dir
-from app.knowledge.uploads import MAX_UPLOAD_BYTES, UPLOAD_TTL_S, UploadError, ingest_upload
+from app.knowledge.uploads import (
+    MAX_UPLOAD_BYTES,
+    UPLOAD_TTL_S,
+    PrivateNotesFullError,
+    UploadError,
+    ingest_upload,
+)
 from app.observability import log_event
 
 router = APIRouter()
@@ -91,8 +97,16 @@ async def upload_note(
     data = await file.read(MAX_UPLOAD_BYTES + 1)  # one byte over is enough to refuse it
     try:
         result = await ingest_upload(
-            session_id, file.filename or "upload.txt", data, request.app.state.store, request.app.state.provider
+            session_id,
+            file.filename or "upload.txt",
+            data,
+            request.app.state.store,
+            request.app.state.provider,
+            charge=lambda chunks: charge(request, "upload_chunks", chunks),
         )
+    except PrivateNotesFullError as exc:
+        log_event(event="private_notes_full", session_id=session_id)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except UploadError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (QuotaExceededError, ModelOverloadedError, ModelTimeoutError) as exc:

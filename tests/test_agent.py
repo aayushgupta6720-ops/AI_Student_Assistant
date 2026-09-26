@@ -1,6 +1,7 @@
 from app.inference.types import Message, TextDelta, ToolCall, ToolCallPart, ToolResultPart
 from app.intelligence.agent import Agent, AgentDone, AgentToken, AgentToolCall, AgentToolResult
 from app.intelligence.memory import SessionStore
+from app.intelligence.prompts import FINAL_CALL_NOTE
 from app.knowledge.store import VectorStore
 from app.tools.builtin import build_registry
 from app.tools.registry import Tool, ToolRegistry
@@ -61,6 +62,26 @@ async def test_max_iterations_guard():
     agent = Agent(provider, _registry(), SessionStore(), max_iterations=3)
     done = (await _collect(agent, "s", "loop"))[-1]
     assert done.iterations == 3 and len(provider.turns) == 0
+    assert done.tools_used == ["calculator"] * 2  # a call on the last turn, offered no tools, isn't run
+
+
+async def test_the_last_allowed_call_gets_no_tools_so_the_turn_ends_with_an_answer():
+    # It used to offer tools too, so a model still searching ended the turn
+    # with results it never read and "(no text answer)" on screen.
+    provider = FakeProvider([
+        tool_turn("calculator", {"expression": "1"}, "c1"),
+        tool_turn("calculator", {"expression": "2"}, "c2"),
+        text_turn("From what I found: 42."),
+    ])
+    memory = SessionStore()
+    agent = Agent(provider, _registry(), memory, max_iterations=3)
+
+    done = (await _collect(agent, "s", "loop"))[-1]
+
+    assert done.answer == "From what I found: 42." and done.iterations == 3
+    assert provider.tools_seen == [["calculator"], ["calculator"], []]
+    assert [FINAL_CALL_NOTE in s for s in provider.systems] == [False, False, True]
+    assert memory.history("s")[-1].role == "assistant"  # no unread tool results left behind
 
 
 def test_memory_trim_never_orphans_tool_results():

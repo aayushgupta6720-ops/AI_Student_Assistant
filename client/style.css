@@ -101,7 +101,7 @@ button:disabled { opacity: .5; cursor: default; }
   border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
   transition: background .15s, border-color .15s, color .15s;
 }
-.chip:hover { background: var(--accent-soft); border-color: transparent; color: var(--accent-text); }
+.chip:hover:not(:disabled) { background: var(--accent-soft); border-color: transparent; color: var(--accent-text); }
 #newsession { margin-top: auto; }
 
 /* ---- chat ------------------------------------------------------------------ */

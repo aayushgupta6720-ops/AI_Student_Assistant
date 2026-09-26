@@ -6,6 +6,7 @@ executes calls by name, catching exceptions so a broken tool becomes an
 error result the model can read rather than a crashed request."""
 
 import inspect
+import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -57,6 +58,10 @@ class ToolRegistry:
                 result = tool.handler(**args)
                 if inspect.isawaitable(result):
                     result = await result
+                # The result is kept in the chat's history and sent back to the
+                # model as JSON on every later turn, so one that can't be sent
+                # (a nan, a complex number) would break the chat for good.
+                json.dumps(result, allow_nan=False)
                 return ToolOutcome(name, result)
             except Exception as exc:  # noqa: BLE001 - surface any failure to the model
                 return ToolOutcome(name, {"error": f"{type(exc).__name__}: {exc}"}, is_error=True)

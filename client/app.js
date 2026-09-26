@@ -114,11 +114,22 @@ const handlers = {
   },
 };
 
+// One answer at a time. A disabled Send button isn't enough: Enter calls
+// requestSubmit(), which submits anyway, and two turns at once in one session
+// get their history mixed up.
+let busy = false;
+function setBusy(on) {
+  busy = on;
+  sendBtn.disabled = on;
+  document.querySelectorAll(".suggestions button").forEach(b => { b.disabled = on; });
+}
+
 // SSE over a POST body: EventSource can't do that, so parse the stream by hand.
 async function chat(text) {
+  if (busy) return;
+  setBusy(true);
   addUser(text);
   const view = addAssistant();
-  sendBtn.disabled = true;
   try {
     const res = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId, message: text, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
     if (!res.ok) throw new Error(await errorText(res));
@@ -142,11 +153,12 @@ async function chat(text) {
   } catch (e) {
     handlers.error(view, { message: e.message });
   } finally {
-    sendBtn.disabled = false; input.focus();
+    setBusy(false); input.focus();
   }
 }
 
-$("#composer").addEventListener("submit", (e) => { e.preventDefault(); const t = input.value.trim(); if (!t) return; input.value = ""; input.style.height = "auto"; chat(t); });
+// While an answer streams, Enter leaves the draft in the box rather than dropping it.
+$("#composer").addEventListener("submit", (e) => { e.preventDefault(); const t = input.value.trim(); if (!t || busy) return; input.value = ""; input.style.height = "auto"; chat(t); });
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); } });
 input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; });
 // On narrow screens the sidebar is a drawer (see style.css); on wide ones these are no-ops.

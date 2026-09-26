@@ -54,6 +54,19 @@ def test_every_limit_applies_and_visitors_are_counted_separately():
     assert limiter.hit("b") is None  # someone else
 
 
+def test_a_cost_counts_against_the_limit_and_the_wait_is_until_it_fits():
+    clock = Clock()
+    limiter = RateLimiter("note chunks", [Limit(1000, 86400, "a day")], clock=clock)
+    assert limiter.hit("a", 600) is None
+    clock.now += 3600
+    assert limiter.hit("a", 300) is None
+
+    limit, retry_after = limiter.hit("a", 200)  # 900 used: fits once the 600 leave the window
+    assert limit.count == 1000 and retry_after == pytest.approx(86400 - 3600)
+    assert limiter.hit("a", 100) is None  # a smaller one still fits now
+    assert limiter.hit("a", 1001)[1] == 86400  # never fits: the longest wait there is
+
+
 def test_a_zero_limit_is_off_and_tracked_visitors_are_capped():
     assert RateLimiter("x", [Limit(0, 60, "a minute")]).hit("a") is None
     limiter = RateLimiter("x", [Limit(5, 60, "a minute")], max_keys=2)
