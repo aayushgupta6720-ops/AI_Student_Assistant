@@ -1,4 +1,6 @@
-from app.inference.types import Message, TextDelta, ToolCall, ToolCallPart, ToolResultPart
+import pytest
+
+from app.inference.types import Message, StreamEnd, TextDelta, ToolCall, ToolCallPart, ToolResultPart
 from app.intelligence.agent import Agent, AgentDone, AgentToken, AgentToolCall, AgentToolResult
 from app.intelligence.memory import SessionStore
 from app.intelligence.prompts import FINAL_CALL_NOTE
@@ -82,6 +84,28 @@ async def test_the_last_allowed_call_gets_no_tools_so_the_turn_ends_with_an_answ
     assert provider.tools_seen == [["calculator"], ["calculator"], []]
     assert [FINAL_CALL_NOTE in s for s in provider.systems] == [False, False, True]
     assert memory.history("s")[-1].role == "assistant"  # no unread tool results left behind
+
+
+@pytest.mark.parametrize(
+    ("events", "answer", "notice"),
+    [
+        ([TextDelta("The first three books are")], "The first three books are", None),  # scripted "stop"
+        ([TextDelta("The first three books are"), StreamEnd("max_tokens")], "The first three books are", "cut off"),
+        ([StreamEnd("safety")], "", "safety filters"),
+    ],
+)
+async def test_an_answer_that_stops_early_says_why(events, answer, notice):
+    # A cut-off answer just ended mid-sentence, and a blocked one showed
+    # "(no text answer)".
+    agent = Agent(FakeProvider([events]), _registry(), SessionStore())
+
+    done = (await _collect(agent, "s", "what's on my reading list?"))[-1]
+
+    assert done.answer == answer
+    if notice is None:
+        assert done.notice is None and done.finish_reason == "stop"
+    else:
+        assert notice in done.notice
 
 
 def test_memory_trim_never_orphans_tool_results():

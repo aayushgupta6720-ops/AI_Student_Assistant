@@ -70,9 +70,21 @@ class AgentDone:
     trace: CallTrace
     prompt_version: str = SYSTEM_PROMPT_VERSION
     tools_used: list[str] = field(default_factory=list)
+    finish_reason: str = "stop"  # why the turn's last model call stopped
+    notice: str | None = None  # what to tell the user when that wasn't a normal finish
 
 
 AgentEvent = Union[AgentStatus, AgentToolCall, AgentToolResult, AgentToken, AgentDone]
+
+# Shown under the answer (or instead of it), so a cut-off or blocked answer
+# says why rather than ending mid-sentence or showing nothing.
+_NOTICES = {
+    "max_tokens": "The answer was cut off because it reached the model's length limit.",
+    "safety": "Gemini's safety filters blocked this answer.",
+    "recitation": "Gemini stopped this answer because it would have repeated copyrighted text.",
+    "tool_call_error": "The model tried to use a tool but couldn't form the request. Try rephrasing.",
+    "other": "The model stopped before finishing its answer.",
+}
 
 
 class Agent:
@@ -102,6 +114,7 @@ class Agent:
         sources: list[str] = []
         tools_used: list[str] = []
         iterations = 0
+        finish_reason = "stop"
 
         while iterations < self.max_iterations:
             iterations += 1
@@ -128,7 +141,7 @@ class Agent:
                         usage["input_tokens"] = event.input_tokens
                         usage["output_tokens"] = event.output_tokens
                     elif isinstance(event, StreamEnd):
-                        pass
+                        finish_reason = event.finish_reason
 
             # Record exactly what the model said so the next request replays it.
             assistant_parts = [*_merge_text(text_parts), *[
@@ -171,6 +184,8 @@ class Agent:
             iterations=iterations,
             trace=trace,
             tools_used=tools_used,
+            finish_reason=finish_reason,
+            notice=_NOTICES.get(finish_reason),
         )
 
 

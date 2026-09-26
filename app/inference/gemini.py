@@ -41,6 +41,17 @@ _MAX_RATE_LIMIT_RETRIES = 5
 _MAX_OVERLOAD_ATTEMPTS = 4
 _OVERLOAD_BASE_DELAY_S = 1.0
 _EMBED_TASK = {"document": "RETRIEVAL_DOCUMENT", "query": "RETRIEVAL_QUERY"}
+# Gemini's finish reasons as StreamEnd's neutral ones; anything else is "other".
+_FINISH_REASONS = {
+    "FINISH_REASON_UNSPECIFIED": "stop",
+    "STOP": "stop",
+    "MAX_TOKENS": "max_tokens",
+    **dict.fromkeys(
+        ["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT"], "safety"
+    ),
+    **dict.fromkeys(["RECITATION", "IMAGE_RECITATION"], "recitation"),
+    **dict.fromkeys(["MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS"], "tool_call_error"),
+}
 # Gemini rejects an embed request with more than 100 texts ("at most 100
 # requests can be in one batch").
 MAX_TEXTS_PER_EMBED_REQUEST = 100
@@ -239,11 +250,13 @@ class GeminiProvider:
                     output_tokens=(meta.candidates_token_count or 0)
                     + (meta.thoughts_token_count or 0),
                 )
+            if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason:
+                finish_reason = "safety"  # the prompt itself was blocked: no candidates at all
             if not chunk.candidates:
                 continue
             candidate = chunk.candidates[0]
             if candidate.finish_reason:
-                finish_reason = str(candidate.finish_reason.name).lower()
+                finish_reason = _FINISH_REASONS.get(candidate.finish_reason.name, "other")
             for part in candidate.content.parts or []:
                 state = (
                     {"thought_signature": part.thought_signature}

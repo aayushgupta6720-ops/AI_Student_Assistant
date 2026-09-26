@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # CF-Connecting-IP). Unset means the connecting address, right when
     # nothing sits in front. Never X-Forwarded-For: visitors can forge it.
     client_ip_header: str | None = None
+    # Log what visitors typed and the text of tool arguments. Off, the log
+    # keeps their lengths: they can hold private notes, which the app
+    # otherwise deletes after 24 hours. Turn on to debug from the log.
+    log_chat_text: bool = False
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8"

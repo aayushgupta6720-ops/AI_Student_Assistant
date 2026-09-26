@@ -78,16 +78,23 @@ Ask *"What's on my reading list?"* and this happens:
 The server logs the same thing as one JSON line per call:
 
 ```json
-{"event": "chat_call", "query": "What's on my reading list?", "iterations": 2,
- "tools_used": ["search_notes"], "sources": ["reading-list", ...],
+{"event": "chat_call", "query": "<26 chars>", "iterations": 2,
+ "tools_used": ["search_notes"], "sources": ["reading-list"], "finish_reason": "stop",
  "per_layer_ms": {"inference": 3737.56, "knowledge": 0.75, "tools": 528.86, "intelligence": 0.15},
  "steps": [{"layer": "inference", "name": "generate", "latency_ms": 2108.7, "self_ms": 2108.7, "depth": 0, ...},
-           {"layer": "tools", "name": "search_notes", ..., "depth": 1}, ...]}
+           {"layer": "tools", "name": "search_notes", "meta": {"args": {"query": "<12 chars>"}}, ..., "depth": 1}, ...]}
 ```
 
 `latency_ms` is inclusive, `self_ms` is exclusive of nested steps, so the
 per-layer totals don't double count (`tools.search_notes` wraps
-`inference.embed_query`).
+`inference.embed_query`). What visitors type, and the text of tool
+arguments, is logged as its length: it can hold a private note ("Save a note
+titled…"), and the log would keep it long after the note's 24 hours. Set
+`LOG_CHAT_TEXT=true` to log the text itself while debugging.
+
+A turn that ends early says why under the answer: cut off at the model's
+length limit, blocked by a safety filter, and so on (`finish_reason`, in
+provider-neutral terms), instead of stopping mid-sentence or showing nothing.
 
 ## Run it
 
@@ -155,7 +162,10 @@ the model on every later turn, so one that can't be sent broke the chat for
 good. A turn's last model call (the 6th) is offered no tools, so it ends
 with an answer rather than tool results nobody reads. Answers are rendered as markdown through
 DOMPurify with only markdown's own tags allowed, so HTML that the model
-repeats from a web page or note can't run script or load images.
+repeats from a web page or note can't run script or load images. DOMPurify
+and marked load from cdnjs pinned by integrity hash, so a tampered copy
+doesn't run (answers then show as plain text), and links in answers open in
+a new tab, since leaving the page and coming back clears the chat.
 
 ### Per-visitor rate limits
 
@@ -257,6 +267,20 @@ Everything runs offline against `tests/fake_provider.py`, a scripted
 registry, and the agent loop (tool call → result fed back → final answer,
 memory persistence, max-iteration guard). `fetch_url` is tested against
 local HTTP servers: private addresses, redirects, huge and slow pages.
+
+Which tool the model picks can only be checked against the model itself:
+
+```bash
+python -m scripts.eval_routing              # ~20 Gemini requests
+python -m scripts.eval_routing --repeat 3 --only "assistant built"
+```
+
+It asks nine typical questions (the page's suggestions, plus ones that are
+easy to route wrong) in fresh chats and checks the tools each used. The
+`assistant_v1` prompt answered "How is this assistant built?" from general
+knowledge instead of searching the notes that document it (0/1 in the eval,
+and seen in production); `assistant_v2` searched in 2/2 runs, with every other
+question still routed correctly.
 
 ## How to swap a layer
 

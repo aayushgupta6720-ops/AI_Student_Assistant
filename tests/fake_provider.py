@@ -19,10 +19,12 @@ class FakeProvider:
         self.seen.append(list(messages))
         self.systems.append(system)
         self.tools_seen.append([t.name for t in tools])
-        for event in self.turns.pop(0):
+        events = self.turns.pop(0)
+        for event in events:
             yield event
         yield Usage(input_tokens=10, output_tokens=5)
-        yield StreamEnd(finish_reason="stop")
+        if not any(isinstance(e, StreamEnd) for e in events):  # a turn may script its own
+            yield StreamEnd(finish_reason="stop")
 
     async def embed(self, texts: list[str], kind: str) -> list[list[float]]:
         # Deterministic "embedding": character histogram over 4 buckets.

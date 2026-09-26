@@ -62,6 +62,22 @@ def _quota_error(exc: QuotaExceededError) -> dict:
     return {"kind": "quota", "message": message, "resets_at": resets_at}
 
 
+def _loggable(value):
+    """`value` as the log may keep it: text becomes its length unless
+    LOG_CHAT_TEXT is on. A message or a tool's arguments can hold a private
+    note ("Save a note titled…", save_note's content), and logs outlive the
+    note's 24 hours and are readable by whoever runs the app."""
+    if get_settings().log_chat_text:
+        return value
+    if isinstance(value, str):
+        return f"<{len(value)} chars>"
+    if isinstance(value, dict):
+        return {k: _loggable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_loggable(v) for v in value]
+    return value  # numbers, bools, None: no text in them
+
+
 def _preview(result: dict, limit: int = 300) -> dict:
     """Trim tool results for the wire; the model still gets the full thing."""
     text = json.dumps(result, default=str)
@@ -175,14 +191,17 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
                         "prompt_version": ev.prompt_version,
                         "per_layer_ms": ev.trace.per_layer_ms(),
                         "total_tokens": ev.trace.total_tokens,
+                        "finish_reason": ev.finish_reason,
+                        "notice": ev.notice,
                         "steps": ev.trace.as_dicts(),
                     }
                     log_event(
                         event="chat_call",
                         session_id=body.session_id,
-                        query=body.message,
+                        query=_loggable(body.message),
                         latency_ms=round((time.perf_counter() - started) * 1000, 2),
-                        **{k: v for k, v in payload.items() if k != "answer"},
+                        **{k: v for k, v in payload.items() if k not in ("answer", "notice", "steps")},
+                        steps=[{**s, "meta": _loggable(s["meta"])} for s in payload["steps"]],
                     )
                     yield _sse("done", payload)
         except QuotaExceededError as exc:
