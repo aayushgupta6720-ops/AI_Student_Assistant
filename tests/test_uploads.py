@@ -1,4 +1,6 @@
 import time
+import tracemalloc
+import zlib
 
 import httpx
 import pytest
@@ -87,6 +89,75 @@ def test_a_small_pdf_with_too_much_text_is_refused(monkeypatch):
 def test_notes_without_a_title_get_one_from_the_file_name():
     assert as_note("Lecture_3-cells.txt", "Mitochondria.") == ("lecture-3-cells", "# Lecture 3 cells\n\nMitochondria.")
     assert as_note("x.md", "# Own title\n\nBody") == ("x", "# Own title\n\nBody")
+
+
+def _pdf_pages(streams: list[bytes], compress: bool = True) -> bytes:
+    """A PDF with one page per content stream (raw drawing instructions)."""
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>", b"", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    kids = []
+    for ops in streams:
+        body = zlib.compress(ops, 9) if compress else ops
+        objects.append(b"<< /Length %d%s >>\nstream\n" % (len(body), b" /Filter /FlateDecode" if compress else b"")
+                       + body + b"\nendstream")
+        objects.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                       b"/Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>" % len(objects))
+        kids.append(len(objects))
+    objects[1] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(b"%d 0 R" % k for k in kids), len(kids))
+    out, offsets = b"%PDF-1.4\n", []
+    for i, obj in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + obj + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    return out + b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+
+
+def _text(words: str) -> bytes:
+    return b"BT /F1 12 Tf 72 720 Td (" + words.encode() + b") Tj ET"
+
+
+def _drawing(size: int) -> bytes:
+    return b"0 0 m\n" * (size // 6)
+
+
+@pytest.mark.parametrize(
+    "streams",
+    [
+        [_drawing(8 * 1024 * 1024)],  # 13 KB compressed; took memory from 66 MB to 496 MB
+        [_drawing(uploads.MAX_PDF_PAGE_BYTES + 6)] * 3,  # just past the per-page limit
+    ],
+)
+def test_a_pdf_of_huge_drawings_is_refused_cheaply(streams):
+    data = _pdf_pages(streams)
+    tracemalloc.start()
+    started = time.perf_counter()
+    try:
+        with pytest.raises(UploadError, match="too complex to read"):
+            extract_text("bomb.pdf", data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(data) < 50_000
+    assert peak < 20 * 1024 * 1024 and time.perf_counter() - started < 1
+
+
+def test_text_pages_are_read_around_a_skipped_drawing():
+    data = _pdf_pages([_text("Mitosis has four phases"), _drawing(2 * 1024 * 1024), _text("Meiosis halves chromosomes")])
+
+    text = extract_text("biology.pdf", data)
+
+    assert "Mitosis has four phases" in text and "Meiosis halves chromosomes" in text
+
+
+def test_a_pdf_with_too_many_detailed_pages_is_refused(monkeypatch):
+    # Each page is under the per-page limit, but parsing them all would hold
+    # the CPU (and the GIL) for as long as the pages keep coming.
+    monkeypatch.setattr(uploads, "MAX_PDF_TOTAL_BYTES", 3000)
+    data = _pdf_pages([_drawing(1000) + _text("page")] * 5)
+
+    with pytest.raises(UploadError, match="too many detailed pages"):
+        extract_text("slides.pdf", data)
 
 
 # ---- storing uploads ---------------------------------------------------------------

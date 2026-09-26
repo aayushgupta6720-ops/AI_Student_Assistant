@@ -8,7 +8,8 @@ import io
 from pathlib import Path
 from typing import Callable
 
-from pypdf import PdfReader
+from pypdf import PageObject, PdfReader, apply_configuration
+from pypdf.errors import LimitReachedError
 
 from app.config import get_settings
 from app.inference.provider import LLMProvider
@@ -23,6 +24,21 @@ MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 MAX_UPLOAD_CHARS = 200_000
 MAX_UPLOADS_PER_SESSION = 10
 UPLOAD_TTL_S = 24 * 3600
+# pypdf holds ~55 bytes of memory per byte of a page's drawing instructions
+# while it extracts text, parses them at ~2 MB/s in pure Python (holding the
+# GIL, so every other request slows), and by default expands a compressed
+# stream to 75 MB: a 13 KB PDF took the process from 66 MB to a 496 MB peak,
+# on a free instance with 512 MB. So no stream expands past 2 MB, a page with
+# over 512 KB of instructions (a detailed drawing; a page of text is tens of
+# KB) is skipped, and a PDF gets at most 4 MB of instructions parsed in all.
+MAX_PDF_STREAM_BYTES = 2 * 1024 * 1024
+MAX_PDF_PAGE_BYTES = 512 * 1024
+MAX_PDF_TOTAL_BYTES = 4 * 1024 * 1024
+_PDF_LIMITS = dict.fromkeys(
+    ["zlib_maximum_output_length", "lzw_maximum_output_length", "run_length_maximum_output_length",
+     "array_based_stream_maximum_output_length"],
+    MAX_PDF_STREAM_BYTES,
+)
 ALLOWED_SUFFIXES = (".md", ".txt", ".pdf")
 
 
@@ -40,21 +56,43 @@ def pdf_text(data: bytes, max_chars: int) -> str:
     of it: later pages aren't extracted at all. Used for uploads and for PDF
     links fetch_url reads. Raises UploadError if there's no text to get."""
     pages: list[str] = []
-    length = 0
+    length = skipped = parsed = 0
     try:
-        for page in PdfReader(io.BytesIO(data)).pages:
-            pages.append((page.extract_text() or "").strip())
-            length += len(pages[-1])
-            if length > max_chars:
-                break  # already enough; don't extract the rest
+        with apply_configuration(**_PDF_LIMITS):
+            for page in PdfReader(io.BytesIO(data)).pages:
+                size = _content_size(page)
+                if size is None or size > MAX_PDF_PAGE_BYTES:
+                    skipped += 1
+                    continue
+                parsed += size
+                if parsed > MAX_PDF_TOTAL_BYTES:
+                    raise UploadError("That PDF has too many detailed pages to read. Split it into smaller files.")
+                pages.append((page.extract_text() or "").strip())
+                length += len(pages[-1])
+                if length > max_chars:
+                    break  # already enough; don't extract the rest
+    except UploadError:
+        raise
     except Exception as exc:  # noqa: BLE001 - pypdf raises all sorts on a broken file
         # Not just pypdf's PdfReadError: a PDF naming an /Encrypt object it
         # doesn't have raised AttributeError, which came back as a 500.
         raise UploadError("That PDF couldn't be read.") from exc
     text = "\n\n".join(pages)
     if not text.strip():
+        if skipped:
+            raise UploadError("That PDF's pages are too complex to read: they're drawings rather than text.")
         raise UploadError("No text found in that PDF. Scanned PDFs without a text layer aren't supported.")
     return text
+
+
+def _content_size(page: PageObject) -> int | None:
+    """The size of a page's drawing instructions, measured before extract_text
+    parses them (the costly part); None if they expand past the stream limit."""
+    try:
+        contents = page.get_contents()  # expands the stream, within _PDF_LIMITS
+    except LimitReachedError:
+        return None
+    return 0 if contents is None else len(contents.get_data())
 
 
 def extract_text(filename: str, data: bytes) -> str:
