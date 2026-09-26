@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     store_path: Path = PROJECT_ROOT / "data" / "knowledge.sqlite"
 
     retrieval_top_k: int = 4
+    # Drop passages scoring this far below the best match. For a question about
+    # the sample notes, the right note scored 0.64-0.78 and unrelated ones
+    # 0.50-0.58, and without this every search returned (and cited) the top 4.
+    retrieval_score_margin: float = 0.1
     chunk_max_chars: int = 800
     chunk_overlap_chars: int = 100
 
@@ -37,7 +41,14 @@ class Settings(BaseSettings):
     chat_limit_per_minute: int = 6
     chat_limit_per_day: int = 30
     upload_limit_per_hour: int = 10
+    # Uploads also count their chunks, since a big file is hundreds of chunks
+    # to embed and keep in memory (a 200,000-character file is ~500).
+    upload_chunk_limit_per_day: int = 1000
     ingest_limit_per_hour: int = 3
+    # Private chunks the whole app keeps, across every session. Search holds
+    # them all in memory: 10,000 took the process from 86 MB to a 205 MB peak,
+    # and a free instance has 512 MB.
+    max_private_chunks: int = 10_000
     # A header holding the visitor's IP, set by a proxy in front of the app
     # that overwrites any client-sent copy (behind Cloudflare, as on Render:
     # CF-Connecting-IP). Unset means the connecting address, right when

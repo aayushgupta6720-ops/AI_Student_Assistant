@@ -124,7 +124,16 @@ that session's private notes), `POST /notes/upload` (multipart `session_id` +
 `file`; up to 2 MB and 200,000 characters of text), `DELETE /notes/{doc_id}?session_id=…`,
 `POST /ingest`, `POST /reset/{session_id}` (also deletes the session's private
 notes unless `?keep_uploads=true`), `GET /docs`. A session can have 10 private
-notes at a time, uploads and saved notes together.
+notes at a time, uploads and saved notes together. The whole app keeps at most
+10,000 private chunks (`MAX_PRIVATE_CHUNKS`), since search holds them all in
+memory: that took the process from 86 MB to a 205 MB peak, on a free
+instance with 512 MB. Past it, uploads get a 503 until older notes expire.
+
+A search returns up to 4 passages (`search_notes` takes 1 to 10), minus any
+scoring more than 0.1 below the best match (`RETRIEVAL_SCORE_MARGIN`), so
+the answer's "retrieved" chips name the note it came from rather than every
+note in the top 4. The cutoff is relative because a terse query's right
+answer can score as low as an unrelated note does for another query.
 
 How private notes stay private: every stored chunk has an owner, either `""`
 for the shared notes or the session id that uploaded or saved it. `search()`
@@ -137,7 +146,12 @@ What the tools refuse: `fetch_url` only fetches public http(s) addresses (not
 localhost, private networks or cloud metadata endpoints), checks every
 redirect, reads at most 2 MB, and gives up after 20 s. `calculator` refuses
 results over about 1,200 digits, since it runs on the event loop and a
-`9**9**9` would stall every chat. Answers are rendered as markdown through
+`9**9**9` would stall every chat, and results JSON can't carry (`inf`, `nan`,
+or a complex number from `(-8)**(1/3)`). The registry turns any tool result
+like that into an error: results stay in the chat's history and go back to
+the model on every later turn, so one that can't be sent broke the chat for
+good. A turn's last model call (the 6th) is offered no tools, so it ends
+with an answer rather than tool results nobody reads. Answers are rendered as markdown through
 DOMPurify with only markdown's own tags allowed, so HTML that the model
 repeats from a web page or note can't run script or load images.
 
@@ -145,11 +159,14 @@ repeats from a web page or note can't run script or load images.
 
 The free-tier quota is shared by everyone using the app, so each visitor
 (an IP address; for IPv6, its /64) gets its own allowance: 6 chat messages a
-minute and 30 a day, 10 uploads an hour and 3 re-ingests an hour. Over a
-limit, the endpoint returns a 429 with a `Retry-After` header, and the chat
-says how long to wait. The model isn't called for a refused request. Change
-the numbers with `CHAT_LIMIT_PER_MINUTE`, `CHAT_LIMIT_PER_DAY`,
-`UPLOAD_LIMIT_PER_HOUR` and `INGEST_LIMIT_PER_HOUR`; 0 turns one off. Counts
+minute and 30 a day, 10 uploads an hour and 3 re-ingests an hour. Uploads
+also count their chunks, 1,000 a day: a file can be ~500 chunks to embed and
+keep in memory, and new sessions don't reset it. Over a limit, the endpoint
+returns a 429 with a `Retry-After` header, and the chat says how long to
+wait. The model isn't called for a refused request, and an upload over its
+chunk budget is refused before anything is embedded. Change the numbers
+with `CHAT_LIMIT_PER_MINUTE`, `CHAT_LIMIT_PER_DAY`, `UPLOAD_LIMIT_PER_HOUR`,
+`UPLOAD_CHUNK_LIMIT_PER_DAY` and `INGEST_LIMIT_PER_HOUR`; 0 turns one off. Counts
 are in memory, which suits the single instance of Render's free plan, and
 reset on restart. Visitors sharing an IP, like a classroom behind one
 router, share one allowance. Request bodies over 128 KB (2.1 MB for

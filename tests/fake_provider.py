@@ -10,11 +10,15 @@ class FakeProvider:
         self.turns = list(turns)
         self.dim = dim
         self.seen: list[list[Message]] = []
+        self.systems: list[str] = []
+        self.tools_seen: list[list[str]] = []  # the tool names each call was offered
 
     async def stream_generate(
         self, *, system: str, messages: list[Message], tools: list[ToolSpec]
     ) -> AsyncIterator[StreamEvent]:
         self.seen.append(list(messages))
+        self.systems.append(system)
+        self.tools_seen.append([t.name for t in tools])
         for event in self.turns.pop(0):
             yield event
         yield Usage(input_tokens=10, output_tokens=5)

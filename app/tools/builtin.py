@@ -49,11 +49,22 @@ _MAX_INT_BITS = 4000
 _PERCENT_RE = re.compile(r"%(?!\s*[-+]?[\d.(])")
 
 
+def _real(value: float) -> float:
+    """value, if it's a finite real number. The result goes back to the model
+    as JSON, which has no inf, nan or complex numbers, and one that can't be
+    sent stays in the chat's history and breaks every later message."""
+    if isinstance(value, complex):  # (-8)**(1/3)
+        raise ValueError("result isn't a real number")
+    if isinstance(value, float) and not math.isfinite(value):  # 1e308*10, 1e999
+        raise ValueError("result too large")
+    return value
+
+
 def _eval_node(node: ast.AST) -> float:
     if isinstance(node, ast.Expression):
         return _eval_node(node.body)
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return node.value
+        return _real(node.value)
     if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
         left, right = _eval_node(node.left), _eval_node(node.right)
         if isinstance(node.op, ast.Pow) and isinstance(left, int) and isinstance(right, int):
@@ -64,7 +75,7 @@ def _eval_node(node: ast.AST) -> float:
         result = _BIN_OPS[type(node.op)](left, right)
         if isinstance(result, int) and result.bit_length() > _MAX_INT_BITS:
             raise ValueError("result too large")
-        return result
+        return _real(result)
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
         return _UNARY_OPS[type(node.op)](_eval_node(node.operand))
     raise ValueError(f"unsupported expression: {ast.dump(node)}")
@@ -220,7 +231,9 @@ async def fetch_url(url: str, max_chars: int = 4000) -> dict:
     return {"url": str(response.url), "status": response.status_code, "text": _visible_text(html, max_chars)}
 
 
-# ---- save_note ----------------------------------------------------------------
+# ---- search_notes / save_note ---------------------------------------------------
+
+MAX_SEARCH_RESULTS = 10
 
 
 def _note_id(store: VectorStore, session_id: str | None, title: str) -> str:
@@ -246,6 +259,10 @@ def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> T
     registry = ToolRegistry()
 
     async def search_notes(query: str, top_k: int = settings.retrieval_top_k) -> dict:
+        # The model picks top_k, and every passage returned is replayed to it on
+        # later turns: a huge one could overflow its context for good, and a
+        # negative one used to return all but the last few passages.
+        top_k = min(max(int(top_k), 1), MAX_SEARCH_RESULTS)
         chunks = await retrieve(query, provider, store, k=top_k)
         return {
             "query": query,
@@ -274,7 +291,13 @@ def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> T
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "What to search for."},
-                    "top_k": {"type": "integer", "description": "Number of passages (default 4)."},
+                    "top_k": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_SEARCH_RESULTS,
+                        "description": f"Number of passages (default {settings.retrieval_top_k}, "
+                        f"at most {MAX_SEARCH_RESULTS}).",
+                    },
                 },
                 "required": ["query"],
             },

@@ -18,3 +18,10 @@ Tool use rules:
 
 Style: concise, direct, markdown-friendly. Do not narrate which tools you are
 about to call; just call them and then answer."""
+
+# Added to the system prompt for the last model call a turn may make, which
+# gets no tools, so the turn ends with an answer rather than unread results.
+FINAL_CALL_NOTE = """
+
+You have used every tool call allowed for this message. Answer now from the
+tool results you already have, and say briefly if anything is still missing."""

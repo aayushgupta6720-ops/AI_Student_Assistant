@@ -123,6 +123,10 @@ class VectorStore:
             "SELECT COUNT(*) FROM chunks WHERE owner = ? OR owner = ?", (SHARED, owner or SHARED)
         ).fetchone()[0]
 
+    def private_count(self) -> int:
+        """Chunks of private notes, across every session."""
+        return self._conn.execute("SELECT COUNT(*) FROM chunks WHERE owner != ?", (SHARED,)).fetchone()[0]
+
     def clear(self) -> None:
         with self._conn:
             self._conn.execute("DELETE FROM chunks")
