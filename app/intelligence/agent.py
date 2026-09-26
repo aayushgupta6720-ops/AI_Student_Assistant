@@ -70,6 +70,7 @@ class AgentDone:
     trace: CallTrace
     prompt_version: str = SYSTEM_PROMPT_VERSION
     tools_used: list[str] = field(default_factory=list)
+    passages: dict[str, list[str]] = field(default_factory=dict)  # doc_id -> passages searches returned
     finish_reason: str = "stop"  # why the turn's last model call stopped
     notice: str | None = None  # what to tell the user when that wasn't a normal finish
 
@@ -105,13 +106,42 @@ class Agent:
     async def run_turn(
         self, session_id: str, user_text: str, timezone: str | None = None
     ) -> AsyncIterator[AgentEvent]:
+        turn: list[Message] = []  # what this turn has added to memory
+        said: list[str] = []  # the answer text streamed so far
+        try:
+            async for event in self._turn(session_id, user_text, timezone, turn, said):
+                yield event
+        except BaseException:  # Stop, a closed tab, or a model error: the turn won't finish
+            self._abandon(session_id, turn, "".join(said))
+            raise
+
+    def _abandon(self, session_id: str, turn: list[Message], said: str) -> None:
+        """Leave memory as the user saw the unfinished turn: their question
+        and any answer text they got. A tool call whose result never came is
+        dropped, and so is a question with no answer at all, which the next
+        turn would otherwise answer too."""
+        if not turn:
+            return
+        question = turn[0]
+        # False if New session cleared the chat meanwhile: then keep nothing.
+        if self.memory.remove(session_id, turn) and said:
+            self.memory.append(session_id, question, Message("assistant", [TextPart(said)]))
+
+    def _remember(self, session_id: str, turn: list[Message], message: Message) -> None:
+        turn.append(message)
+        self.memory.append(session_id, message)
+
+    async def _turn(
+        self, session_id: str, user_text: str, timezone: str | None, turn: list[Message], said: list[str]
+    ) -> AsyncIterator[AgentEvent]:
         trace = start_trace()
         current_session.set(session_id)  # tools' searches see this session's uploads
         user_timezone.set(timezone)  # current_datetime answers in the user's zone
-        self.memory.append(session_id, Message("user", [TextPart(user_text)]))
+        self._remember(session_id, turn, Message("user", [TextPart(user_text)]))
 
         answer_parts: list[str] = []
         sources: list[str] = []
+        passages: dict[str, list[str]] = {}  # what searches returned, per note
         tools_used: list[str] = []
         iterations = 0
         finish_reason = "stop"
@@ -134,6 +164,7 @@ class Agent:
                 ):
                     if isinstance(event, TextDelta):
                         text_parts.append(TextPart(event.text, event.provider_state))
+                        said.append(event.text)
                         yield AgentToken(event.text)
                     elif isinstance(event, ToolCall) and not final:  # none offered on the last call
                         tool_calls.append(event)
@@ -148,7 +179,7 @@ class Agent:
                 ToolCallPart(c.id, c.name, c.args, c.provider_state) for c in tool_calls
             ]]
             if assistant_parts:
-                self.memory.append(session_id, Message("assistant", assistant_parts))
+                self._remember(session_id, turn, Message("assistant", assistant_parts))
             answer_parts.extend(p.text for p in text_parts)
 
             if not tool_calls:
@@ -170,17 +201,22 @@ class Agent:
                 for doc_id in _extract_sources(outcome.result):
                     if doc_id not in sources:
                         sources.append(doc_id)
+                for doc_id, text in _extract_passages(outcome.result):
+                    seen = passages.setdefault(doc_id, [])
+                    if text not in seen:  # a second search can return the same passage
+                        seen.append(text)
                 result_parts.append(
                     ToolResultPart(call.id, call.name, outcome.result, outcome.is_error)
                 )
                 yield AgentToolResult(call.id, call.name, outcome.result, outcome.is_error)
 
             # -- 3. feed results back and loop --------------------------------
-            self.memory.append(session_id, Message("tool", result_parts))
+            self._remember(session_id, turn, Message("tool", result_parts))
 
         yield AgentDone(
             answer="".join(answer_parts),
             sources=sources,
+            passages=passages,
             iterations=iterations,
             trace=trace,
             tools_used=tools_used,
@@ -205,3 +241,9 @@ def _extract_sources(result: dict) -> list[str]:
     if "doc_id" in result:
         return [result["doc_id"]]
     return []
+
+
+def _extract_passages(result: dict) -> list[tuple[str, str]]:
+    """(doc_id, text) for each passage search_notes returned, so the client
+    can show where a cited note's information came from."""
+    return [(r["doc_id"], r["text"]) for r in result.get("results", []) if "doc_id" in r and "text" in r]

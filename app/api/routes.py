@@ -1,6 +1,7 @@
 """HTTP edge between the client layer and the intelligence layer. Translates
 AgentEvents into Server-Sent Events; owns no business logic."""
 
+import asyncio
 import json
 import time
 from dataclasses import asdict
@@ -186,6 +187,7 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
                     payload = {
                         "answer": ev.answer,
                         "sources": ev.sources,
+                        "passages": ev.passages,
                         "iterations": ev.iterations,
                         "tools_used": ev.tools_used,
                         "prompt_version": ev.prompt_version,
@@ -200,10 +202,20 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
                         session_id=body.session_id,
                         query=_loggable(body.message),
                         latency_ms=round((time.perf_counter() - started) * 1000, 2),
-                        **{k: v for k, v in payload.items() if k not in ("answer", "notice", "steps")},
+                        # Not the passages either: they're the notes' own text.
+                        **{k: v for k, v in payload.items() if k not in ("answer", "notice", "steps", "passages")},
                         steps=[{**s, "meta": _loggable(s["meta"])} for s in payload["steps"]],
                     )
                     yield _sse("done", payload)
+        except (asyncio.CancelledError, GeneratorExit):
+            # The client went away (Stop, a closed tab, a dropped connection):
+            # the agent has already tidied the turn out of memory.
+            log_event(
+                event="chat_stopped",
+                session_id=body.session_id,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            raise
         except QuotaExceededError as exc:
             log_event(event="chat_quota_exceeded", session_id=body.session_id, daily=exc.daily, error=str(exc))
             yield _sse("error", _quota_error(exc))

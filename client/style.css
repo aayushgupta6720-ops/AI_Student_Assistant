@@ -129,6 +129,14 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .footer[hidden] { display: none; } /* display:flex below would otherwise override [hidden] */
 .footer { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 8px; }
 .chips span { display: inline-block; background: var(--surface-2); border-radius: 999px; padding: 1px 9px; margin: 0 4px 2px 0; color: var(--text-2); }
+.chips .source {
+  display: inline-block; border: 0; font: inherit; cursor: pointer; background: var(--surface-2);
+  border-radius: 999px; padding: 1px 9px; margin: 0 4px 2px 0; color: var(--accent-text);
+}
+.chips .source:hover, .chips .source[aria-expanded="true"] { background: var(--accent-soft); }
+.passage { margin: 6px 0 8px; padding-left: 10px; border-left: 3px solid var(--border); max-height: 260px; overflow: auto; }
+.passage[hidden] { display: none; }
+.passage p { margin: 0 0 8px; white-space: pre-wrap; color: var(--text-2); }
 .bar { display: flex; height: 6px; border-radius: 999px; overflow: hidden; background: var(--surface-2); }
 .bar div { height: 100%; }
 .barlegend { display: flex; flex-wrap: wrap; gap: 4px 14px; }
@@ -152,12 +160,13 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   font: inherit; padding: 7px 0; max-height: 160px;
 }
 #input::placeholder { color: var(--muted); }
-#send {
+#send, #stop {
   flex-shrink: 0; display: grid; place-items: center; width: 38px; height: 38px;
   border: 0; border-radius: 50%; background: var(--accent); color: var(--on-accent);
   transition: background .15s;
 }
-#send:hover:not(:disabled) { background: var(--accent-hover); }
+#send:hover:not(:disabled), #stop:hover { background: var(--accent-hover); }
+#send[hidden], #stop[hidden] { display: none; } /* display:grid would otherwise override [hidden] */
 .hint { max-width: 760px; margin: 8px auto 0; text-align: center; font-size: 12px; color: var(--muted); }
 
 /* ---- narrow screens: the sidebar becomes a drawer ------------------------------ */

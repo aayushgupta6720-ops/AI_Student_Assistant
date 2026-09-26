@@ -35,6 +35,28 @@ class PrivateNotesFullError(UploadError):
     wrong with the upload; it can work once older notes expire."""
 
 
+def pdf_text(data: bytes, max_chars: int) -> str:
+    """A PDF's text, page by page, stopping once there's more than max_chars
+    of it: later pages aren't extracted at all. Used for uploads and for PDF
+    links fetch_url reads. Raises UploadError if there's no text to get."""
+    pages: list[str] = []
+    length = 0
+    try:
+        for page in PdfReader(io.BytesIO(data)).pages:
+            pages.append((page.extract_text() or "").strip())
+            length += len(pages[-1])
+            if length > max_chars:
+                break  # already enough; don't extract the rest
+    except Exception as exc:  # noqa: BLE001 - pypdf raises all sorts on a broken file
+        # Not just pypdf's PdfReadError: a PDF naming an /Encrypt object it
+        # doesn't have raised AttributeError, which came back as a 500.
+        raise UploadError("That PDF couldn't be read.") from exc
+    text = "\n\n".join(pages)
+    if not text.strip():
+        raise UploadError("No text found in that PDF. Scanned PDFs without a text layer aren't supported.")
+    return text
+
+
 def extract_text(filename: str, data: bytes) -> str:
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
@@ -43,21 +65,7 @@ def extract_text(filename: str, data: bytes) -> str:
         raise UploadError(f"That file is over the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.")
 
     if suffix == ".pdf":
-        pages: list[str] = []
-        length = 0
-        try:
-            for page in PdfReader(io.BytesIO(data)).pages:
-                pages.append((page.extract_text() or "").strip())
-                length += len(pages[-1])
-                if length > MAX_UPLOAD_CHARS:
-                    break  # already too long; don't extract the rest
-        except Exception as exc:  # noqa: BLE001 - pypdf raises all sorts on a broken file
-            # Not just pypdf's PdfReadError: a PDF naming an /Encrypt object it
-            # doesn't have raised AttributeError, which came back as a 500.
-            raise UploadError("That PDF couldn't be read.") from exc
-        text = "\n\n".join(pages)
-        if not text.strip():
-            raise UploadError("No text found in that PDF. Scanned PDFs without a text layer aren't supported.")
+        text = pdf_text(data, MAX_UPLOAD_CHARS)
     else:
         try:
             text = data.decode("utf-8")

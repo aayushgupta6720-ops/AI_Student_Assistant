@@ -96,6 +96,15 @@ A turn that ends early says why under the answer: cut off at the model's
 length limit, blocked by a safety filter, and so on (`finish_reason`, in
 provider-neutral terms), instead of stopping mid-sentence or showing nothing.
 
+**Stop** (the button that replaces Send while an answer streams, or Esc)
+aborts the request. The server sees the connection close, cancels the turn
+and logs `chat_stopped`, and the agent leaves memory as the user saw it: the
+question and whatever answer text had arrived. A tool call whose result never
+came is dropped, and so is a question with no answer yet, or the next message
+would get an answer to both. The same tidy-up runs when a tab closes
+mid-answer or the model fails partway, and New session stops a streaming
+answer before clearing the chat.
+
 ## Run it
 
 ```bash
@@ -142,7 +151,10 @@ A search returns up to 4 passages (`search_notes` takes 1 to 10), minus any
 scoring more than 0.1 below the best match (`RETRIEVAL_SCORE_MARGIN`), so
 the answer's "retrieved" chips name the note it came from rather than every
 note in the top 4. The cutoff is relative because a terse query's right
-answer can score as low as an unrelated note does for another query.
+answer can score as low as an unrelated note does for another query. Click a
+chip to see the passages the search returned from that note, the text the
+answer was based on; the `done` event carries them as `passages` (never
+logged: they're the notes' own text).
 
 How private notes stay private: every stored chunk has an owner, either `""`
 for the shared notes or the session id that uploaded or saved it. `search()`
@@ -153,7 +165,11 @@ passing a session id through every tool. `save_note` never writes to
 
 What the tools refuse: `fetch_url` only fetches public http(s) addresses (not
 localhost, private networks or cloud metadata endpoints), checks every
-redirect, reads at most 2 MB, and gives up after 20 s. `calculator` refuses
+redirect, reads at most 2 MB, and gives up after 20 s. It reads PDF links
+too (up to 10 MB, since a PDF can't be read from a prefix), with the same
+pypdf extraction as uploads, stopping once it has enough text; other files
+(images, zips) are refused before download rather than decoded as garbage
+text. `calculator` refuses
 results over about 1,200 digits, since it runs on the event loop and a
 `9**9**9` would stall every chat, and results JSON can't carry (`inf`, `nan`,
 or a complex number from `(-8)**(1/3)`). The registry turns any tool result

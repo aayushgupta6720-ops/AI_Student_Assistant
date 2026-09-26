@@ -1,6 +1,8 @@
+import asyncio
+
 import pytest
 
-from app.inference.types import Message, StreamEnd, TextDelta, ToolCall, ToolCallPart, ToolResultPart
+from app.inference.types import Message, StreamEnd, TextDelta, TextPart, ToolCall, ToolCallPart, ToolResultPart
 from app.intelligence.agent import Agent, AgentDone, AgentToken, AgentToolCall, AgentToolResult
 from app.intelligence.memory import SessionStore
 from app.intelligence.prompts import FINAL_CALL_NOTE
@@ -134,3 +136,102 @@ async def test_the_turns_time_zone_reaches_current_datetime():
 
     [result] = [e for e in events if isinstance(e, AgentToolResult)]
     assert result.result["timezone"] == "Asia/Kolkata" and result.result["iso"].endswith("+05:30")
+
+
+# ---- a turn that doesn't finish ----------------------------------------------------
+
+
+def _roles(memory: SessionStore, session: str) -> list[str]:
+    return [f"{m.role}:{m.text()}" if m.text() else m.role for m in memory.history(session)]
+
+
+def _slow_registry() -> ToolRegistry:
+    reg = ToolRegistry()
+
+    async def slow(expression):
+        await asyncio.sleep(10)
+        return {"result": 1}
+
+    reg.register(Tool("calculator", "calc", {"type": "object"}, slow))
+    return reg
+
+
+async def test_stop_during_a_tool_forgets_the_unanswered_question():
+    # It used to leave the question and a tool call with no result, and the
+    # next turn answered the stopped question as well.
+    memory = SessionStore()
+    memory.append("s", Message("user", [TextPart("earlier")]), Message("assistant", [TextPart("reply")]))
+    agent = Agent(FakeProvider([tool_turn("calculator", {"expression": "1"})]), _slow_registry(), memory)
+
+    async def consume():
+        async for _ in agent.run_turn("s", "stopped question"):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    task.cancel()  # what the server does when the browser stops the request
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _roles(memory, "s") == ["user:earlier", "assistant:reply"]
+
+
+async def test_stop_mid_answer_keeps_the_question_and_the_text_already_shown():
+    memory = SessionStore()
+    agent = Agent(FakeProvider([[TextDelta("The first "), TextDelta("three books")]]), _registry(), memory)
+    turn = agent.run_turn("s", "what's on my reading list?")
+
+    async for event in turn:
+        if isinstance(event, AgentToken):
+            break  # stopped after the first words arrived
+    await turn.aclose()
+
+    assert _roles(memory, "s") == ["user:what's on my reading list?", "assistant:The first "]
+
+
+async def test_a_model_error_before_any_answer_leaves_no_trace():
+    class FailingProvider(FakeProvider):
+        async def stream_generate(self, **kwargs):
+            raise RuntimeError("429")
+            yield
+
+    memory = SessionStore()
+    agent = Agent(FailingProvider([]), _registry(), memory)
+
+    with pytest.raises(RuntimeError):
+        await _collect(agent, "s", "hi")
+
+    assert memory.history("s") == []  # retrying won't send the question twice
+
+
+async def test_stop_after_new_session_keeps_nothing_in_the_fresh_chat():
+    memory = SessionStore()
+    agent = Agent(FakeProvider([[TextDelta("partial")]]), _registry(), memory)
+    turn = agent.run_turn("s", "question")
+    async for event in turn:
+        if isinstance(event, AgentToken):
+            break
+    memory.reset("s")  # New session while the answer was streaming
+    await turn.aclose()
+
+    assert memory.history("s") == []
+
+
+async def test_the_passages_behind_each_source_are_collected_once():
+    provider = FakeProvider([
+        [ToolCall("c1", "search_notes", {"query": "books"}), ToolCall("c2", "search_notes", {"query": "reading"})],
+        text_turn("Dune."),
+    ])
+    reg = ToolRegistry()
+    reg.register(Tool("search_notes", "search", {"type": "object"}, lambda query: {"results": [
+        {"doc_id": "reading-list", "score": 0.7, "text": "# Reading list\n\nDune"},
+        {"doc_id": "reading-list", "score": 0.6, "text": f"# Reading list\n\n{query} section"},
+    ]}))
+    agent = Agent(provider, reg, SessionStore())
+
+    done = (await _collect(agent, "s", "what am I reading?"))[-1]
+
+    assert done.sources == ["reading-list"]
+    assert done.passages == {"reading-list": [
+        "# Reading list\n\nDune", "# Reading list\n\nbooks section", "# Reading list\n\nreading section",
+    ]}

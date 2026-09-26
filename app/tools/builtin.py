@@ -4,7 +4,7 @@
   save_note        -> knowledge layer (stores a private note for this session)
   calculator       -> pure computation, no other layer
   current_datetime -> pure computation
-  fetch_url        -> external I/O
+  fetch_url        -> external I/O (and the knowledge layer's PDF reader, for PDF links)
 """
 
 import ast
@@ -25,7 +25,7 @@ from app.inference.provider import LLMProvider
 from app.knowledge.ingest import slugify
 from app.knowledge.retrieval import current_session, get_store, retrieve
 from app.knowledge.store import VectorStore
-from app.knowledge.uploads import UPLOAD_TTL_S, store_private_note
+from app.knowledge.uploads import UPLOAD_TTL_S, UploadError, pdf_text, store_private_note
 from app.tools.registry import Tool, ToolRegistry
 
 # ---- calculator: a safe arithmetic evaluator (no eval()) --------------------
@@ -122,6 +122,11 @@ def current_datetime() -> dict:
 # Plenty of HTML to find max_chars of text in; reading stops here so a huge
 # or endless response can't fill the server's memory.
 MAX_FETCH_BYTES = 2 * 1024 * 1024
+# A PDF can't be read from a prefix (its index is at the end), and lecture
+# slides with images are often several MB, so PDFs get a bigger cap.
+MAX_FETCH_PDF_BYTES = 10 * 1024 * 1024
+# Anything else (images, zips, audio) used to be decoded as text: garbage.
+_TEXT_TYPES = ("text/", "application/xhtml+xml", "application/xml", "application/json")
 MAX_FETCH_REDIRECTS = 5
 FETCH_DEADLINE_S = 20.0  # for the whole fetch; httpx's timeout is per read
 
@@ -191,14 +196,25 @@ def _check_connected_peer(response: httpx.Response, host: str) -> None:
         _refuse_private(peer[0], host)
 
 
-async def _read_capped(response: httpx.Response) -> bytes:
+async def _read_capped(response: httpx.Response, limit: int) -> bytes:
     body = bytearray()
     async for chunk in response.aiter_bytes():
         body += chunk
-        if len(body) >= MAX_FETCH_BYTES:
+        if len(body) >= limit:
             break
-    del body[MAX_FETCH_BYTES:]
+    del body[limit:]
     return bytes(body)
+
+
+def _is_pdf(response: httpx.Response) -> bool:
+    kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    return kind == "application/pdf" or response.url.path.lower().endswith(".pdf")
+
+
+def _refuse_binary(response: httpx.Response) -> None:
+    kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    if kind and not kind.startswith(_TEXT_TYPES) and not _is_pdf(response):
+        raise ValueError(f"that link is {kind}, not a web page, text or PDF, so it can't be read")
 
 
 async def _get_public_page(url: httpx.URL) -> tuple[httpx.Response, bytes]:
@@ -214,7 +230,9 @@ async def _get_public_page(url: httpx.URL) -> tuple[httpx.Response, bytes]:
                     url = response.next_request.url
                     continue
                 response.raise_for_status()
-                return response, await _read_capped(response)
+                _refuse_binary(response)  # before downloading it
+                limit = MAX_FETCH_PDF_BYTES if _is_pdf(response) else MAX_FETCH_BYTES
+                return response, await _read_capped(response, limit)
     raise ValueError(f"more than {MAX_FETCH_REDIRECTS} redirects")
 
 
@@ -224,11 +242,20 @@ async def fetch_url(url: str, max_chars: int = 4000) -> dict:
             response, body = await _get_public_page(httpx.URL(url))
     except TimeoutError as exc:
         raise TimeoutError(f"gave up after {FETCH_DEADLINE_S:g}s") from exc
+    if _is_pdf(response):
+        if len(body) >= MAX_FETCH_PDF_BYTES:
+            raise ValueError(f"that PDF is over {MAX_FETCH_PDF_BYTES // (1024 * 1024)} MB, too big to read")
+        try:
+            # CPU-bound, so off the event loop; stops once it has max_chars.
+            text = await asyncio.to_thread(pdf_text, body, max_chars)
+        except UploadError as exc:
+            raise ValueError(str(exc)) from exc
+        return {"url": str(response.url), "status": response.status_code, "type": "pdf", "text": text[:max_chars]}
     try:
         html = body.decode(response.charset_encoding or "utf-8", errors="replace")
     except LookupError:  # a charset Python doesn't know
         html = body.decode("utf-8", errors="replace")
-    return {"url": str(response.url), "status": response.status_code, "text": _visible_text(html, max_chars)}
+    return {"url": str(response.url), "status": response.status_code, "type": "page", "text": _visible_text(html, max_chars)}
 
 
 # ---- search_notes / save_note ---------------------------------------------------
@@ -350,8 +377,8 @@ def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> T
     registry.register(
         Tool(
             "fetch_url",
-            "Fetch a public web page and return its visible text (truncated). Use when "
-            "the user gives a URL or asks about the contents of a specific page.",
+            "Fetch a public web page or PDF and return its visible text (truncated). Use "
+            "when the user gives a URL or asks about the contents of a specific page or PDF.",
             {
                 "type": "object",
                 "properties": {"url": {"type": "string", "description": "Absolute http(s) URL."}},

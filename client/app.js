@@ -16,7 +16,7 @@ const sessionId = (() => {
   return fresh;
 })();
 const $ = (s) => document.querySelector(s);
-const messages = $("#messages"), input = $("#input"), sendBtn = $("#send");
+const messages = $("#messages"), input = $("#input"), sendBtn = $("#send"), stopBtn = $("#stop");
 const LAYERS = ["intelligence", "inference", "knowledge", "tools"];
 
 // The server's own explanation (e.g. a rate limit's "try again in 40 seconds"), else the status.
@@ -90,6 +90,26 @@ function renderMarkdown(el, text) {
   else el.textContent = text;  // a CDN script didn't load: plain text beats unsafe HTML
 }
 
+// A source a search returned passages from is a button that shows them;
+// a note that was only saved this turn has none to show.
+function sourceChips(d) {
+  const passages = d.passages || {};
+  return d.sources.map(s => passages[s]
+    ? `<button type="button" class="source" aria-expanded="false" data-doc="${esc(s)}">${esc(s)}</button>`
+    : `<span>${esc(s)}</span>`).join("");
+}
+messages.addEventListener("click", (e) => {
+  const chip = e.target.closest(".source");
+  if (!chip) return;
+  const footer = chip.closest(".footer"), panel = footer.querySelector(".passage");
+  const opening = chip.getAttribute("aria-expanded") !== "true";
+  footer.querySelectorAll(".source").forEach(c => c.setAttribute("aria-expanded", "false"));
+  chip.setAttribute("aria-expanded", String(opening));
+  // Plain text, as the note has it: where the answer's information came from.
+  panel.innerHTML = opening ? footer.passages[chip.dataset.doc].map(t => `<p>${esc(t)}</p>`).join("") : "";
+  panel.hidden = !opening;
+});
+
 const handlers = {
   status: (v, d) => row(v, "intelligence", `iteration ${d.iteration}: ${esc(d.text)}`),
   tool_call: (v, d) => row(v, "tools", `call <code>${esc(d.name)}(${esc(JSON.stringify(d.args))})</code>`),
@@ -105,8 +125,9 @@ const handlers = {
     const bar = LAYERS.map(l => `<div class="layer-${l}" style="width:${100 * (d.per_layer_ms[l] || 0) / total}%" title="${l}: ${d.per_layer_ms[l] || 0} ms"></div>`).join("");
     const legend = LAYERS.filter(l => d.per_layer_ms[l]).map(l => `<span><span class="swatch ${l}"></span>${l} ${d.per_layer_ms[l]} ms</span>`).join("");
     v.footer.hidden = false;
+    v.footer.passages = d.passages || {};  // read by the source chips' click handler
     v.footer.innerHTML =
-      (d.sources.length ? `<div class="chips">retrieved: ${d.sources.map(s => `<span>${esc(s)}</span>`).join("")}</div>` : "") +
+      (d.sources.length ? `<div class="chips">retrieved: ${sourceChips(d)}</div><div class="passage" hidden></div>` : "") +
       `<div class="bar">${bar}</div><div class="barlegend">${legend}</div>` +
       `<div>${d.iterations} model call(s) · ${d.total_tokens} tokens · tools: ${d.tools_used.length ? d.tools_used.map(esc).join(", ") : "none"}</div>`;
     if (d.tools_used.includes("save_note")) loadSidebar();
@@ -129,8 +150,14 @@ let busy = false;
 function setBusy(on) {
   busy = on;
   sendBtn.disabled = on;
+  sendBtn.hidden = on; stopBtn.hidden = !on;  // Stop takes Send's place while an answer streams
   document.querySelectorAll(".suggestions button").forEach(b => { b.disabled = on; });
 }
+
+// Stop: abort the request. The server sees the connection close, stops the
+// turn and keeps only what was shown here in the chat's memory.
+let controller = null;
+function stop() { controller?.abort(); }
 
 // SSE over a POST body: EventSource can't do that, so parse the stream by hand.
 async function chat(text) {
@@ -138,8 +165,9 @@ async function chat(text) {
   setBusy(true);
   addUser(text);
   const view = addAssistant();
+  controller = new AbortController();
   try {
-    const res = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId, message: text, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
+    const res = await fetch("/chat", { method: "POST", signal: controller.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId, message: text, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
     if (!res.ok) throw new Error(await errorText(res));
     const reader = res.body.getReader(), dec = new TextDecoder();
     let buf = "", finished = false;
@@ -163,8 +191,12 @@ async function chat(text) {
     // done or error event; without this the cursor just kept blinking.
     if (!finished) handlers.error(view, { message: "The connection closed before the answer finished. Try sending your message again." });
   } catch (e) {
-    handlers.error(view, { message: e.message });
+    if (e.name === "AbortError") {  // Stop: not an error, and whatever arrived stays
+      view.answer.classList.remove("cursor");
+      view.answer.insertAdjacentHTML("beforeend", `<p class="notice">Stopped.</p>`);
+    } else handlers.error(view, { message: e.message });
   } finally {
+    controller = null;
     setBusy(false); input.focus();
   }
 }
@@ -182,12 +214,16 @@ function setDrawer(open) {
 menuBtn.addEventListener("click", () => setDrawer(!document.body.classList.contains("drawer-open")));
 $("#backdrop").addEventListener("click", () => setDrawer(false));
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && document.body.classList.contains("drawer-open")) { setDrawer(false); menuBtn.focus(); }
+  if (e.key !== "Escape") return;
+  if (document.body.classList.contains("drawer-open")) { setDrawer(false); menuBtn.focus(); }
+  else if (busy) stop();
 });
+stopBtn.addEventListener("click", stop);
 
 document.querySelectorAll(".suggestions button").forEach(b => b.addEventListener("click", () => { setDrawer(false); chat(b.textContent.trim()); }));
 $("#newsession").addEventListener("click", async () => {
   setDrawer(false);
+  stop();  // an answer still streaming belongs to the old chat
   try {
     await getJSON(`/reset/${encodeURIComponent(sessionId)}`, { method: "POST" });
   } catch (err) {

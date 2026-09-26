@@ -28,6 +28,18 @@ class SessionStore:
     def reset(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
 
+    def remove(self, session_id: str, messages: list[Message]) -> bool:
+        """Remove these exact messages (by identity) from the session, and
+        say whether the first was still there: it isn't after a reset, or
+        once trimmed out of the window."""
+        history = self._sessions.get(session_id)
+        if not history or not messages:
+            return False
+        found = any(m is messages[0] for m in history)
+        drop = {id(m) for m in messages}
+        self._sessions[session_id] = [m for m in history if id(m) not in drop]
+        return found
+
     def _trim(self, session_id: str) -> None:
         """Keep the last N messages, but never cut between a tool-call
         assistant message and its tool results - the model rejects orphans."""
