@@ -3,10 +3,13 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+import app.api.routes as routes
 import app.main as main
 from app.api.ratelimit import build_rate_limiters
 from app.config import get_settings
 from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
+from app.intelligence.agent import AgentDone
+from app.observability import CallTrace, StepRecord
 
 
 class QuotaAgent:
@@ -72,6 +75,42 @@ async def test_an_unexpected_error_shows_a_plain_message_not_the_exception(monke
     assert event == "error" and data["kind"] == "internal"
     assert "Something went wrong" in data["message"]
     assert "INVALID_ARGUMENT" not in data["message"] and "RuntimeError" not in data["message"]
+
+
+class SavingAgent:
+    """A turn that saved a private note, as its trace records it."""
+
+    async def run_turn(self, session_id, user_text, timezone=None):
+        trace = CallTrace()
+        trace.add(StepRecord("tools", "save_note", 1.0, 1.0, depth=1,
+                             meta={"args": {"title": "Bank", "content": "PIN 4321"}}))
+        yield AgentDone(answer="Saved.", sources=["bank"], iterations=2, trace=trace, tools_used=["save_note"])
+
+
+async def test_the_log_keeps_the_length_of_what_was_typed_not_the_text(monkeypatch):
+    # Messages and tool arguments can hold a private note, and the log
+    # outlives it by far.
+    logged = []
+    monkeypatch.setattr(routes, "log_event", lambda **fields: logged.append(fields))
+
+    events = dict(await _chat_events(monkeypatch, SavingAgent()))
+
+    [call] = [f for f in logged if f["event"] == "chat_call"]
+    assert call["query"] == "<2 chars>"
+    assert call["steps"][0]["meta"] == {"args": {"title": "<4 chars>", "content": "<8 chars>"}}
+    assert "PIN" not in json.dumps(call) and call["tools_used"] == ["save_note"]
+    assert events["done"]["steps"][0]["meta"]["args"]["content"] == "PIN 4321"  # the chat still sees it all
+
+
+async def test_log_chat_text_logs_the_text_for_debugging(monkeypatch):
+    monkeypatch.setattr(get_settings(), "log_chat_text", True)
+    logged = []
+    monkeypatch.setattr(routes, "log_event", lambda **fields: logged.append(fields))
+
+    await _chat_events(monkeypatch, SavingAgent())
+
+    [call] = [f for f in logged if f["event"] == "chat_call"]
+    assert call["query"] == "hi" and call["steps"][0]["meta"]["args"]["content"] == "PIN 4321"
 
 
 async def test_timeout_says_the_request_was_stopped(monkeypatch):

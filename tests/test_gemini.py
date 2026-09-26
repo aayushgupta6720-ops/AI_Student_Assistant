@@ -7,7 +7,7 @@ from google.genai.errors import ClientError, ServerError
 
 import app.inference.gemini as gemini
 from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
-from app.inference.types import Message, TextDelta, TextPart
+from app.inference.types import Message, StreamEnd, TextDelta, TextPart
 
 DAILY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
 
@@ -195,6 +195,44 @@ async def _stream_events():
     ):
         events.append(event)
     return events
+
+
+class _Stream(_StallingStream):
+    """Yields the given chunks, then ends normally."""
+
+    async def __anext__(self):
+        if self.chunks:
+            return self.chunks.pop(0)
+        raise StopAsyncIteration
+
+
+def _finished(reason: str) -> types.GenerateContentResponse:
+    return types.GenerateContentResponse(candidates=[types.Candidate(
+        content=types.Content(role="model", parts=[types.Part(text="partial")]), finish_reason=reason,
+    )])
+
+
+@pytest.mark.parametrize(
+    ("chunk", "neutral"),
+    [
+        (_finished("STOP"), "stop"),
+        (_finished("MAX_TOKENS"), "max_tokens"),
+        (_finished("SAFETY"), "safety"),
+        (_finished("PROHIBITED_CONTENT"), "safety"),
+        (_finished("RECITATION"), "recitation"),
+        (_finished("MALFORMED_FUNCTION_CALL"), "tool_call_error"),
+        (_finished("LANGUAGE"), "other"),
+        # The prompt itself blocked: no candidates, just prompt feedback.
+        (types.GenerateContentResponse(prompt_feedback=types.GenerateContentResponsePromptFeedback(block_reason="SAFETY")),
+         "safety"),
+    ],
+)
+async def test_finish_reasons_come_out_in_neutral_terms(monkeypatch, chunk, neutral):
+    _install_stream(monkeypatch, lambda: _Stream([chunk]))
+
+    events = await _stream_events()
+
+    assert events[-1] == StreamEnd(finish_reason=neutral)
 
 
 async def test_stream_that_never_starts_times_out(monkeypatch):

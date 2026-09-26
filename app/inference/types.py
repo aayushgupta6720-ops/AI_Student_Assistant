@@ -85,6 +85,10 @@ class Usage:
 
 @dataclass
 class StreamEnd:
+    # Why the model stopped: "stop" (finished), "max_tokens" (cut off at the
+    # length limit), "safety" (a safety filter blocked the prompt or answer),
+    # "recitation" (it would have repeated copyrighted text),
+    # "tool_call_error" (a tool call it couldn't make properly) or "other".
     finish_reason: str
 
 

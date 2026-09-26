@@ -69,7 +69,8 @@ function row(view, layer, html) {
   r.innerHTML = `<span class="tag layer-${layer}">${layer}</span><span>${html}</span>`;
   view.timeline.appendChild(r); messages.scrollTop = messages.scrollHeight;
 }
-const esc = (s) => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+// Quotes too: it's also used inside attribute values (data-doc="…").
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // The answer can repeat text from web pages and notes someone else wrote, so
 // render only the tags markdown makes: no raw HTML or scripts, and no images or
@@ -79,6 +80,11 @@ const MARKDOWN_ONLY = {
     "blockquote", "ul", "ol", "li", "a", "table", "thead", "tbody", "tr", "th", "td"],
   ALLOWED_ATTR: ["href", "title", "start", "align"],
 };
+// Links open in a new tab: following one in this tab and coming back reloads
+// the page, and a reload clears the chat.
+window.DOMPurify?.addHook("afterSanitizeAttributes", (node) => {
+  if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
+});
 function renderMarkdown(el, text) {
   if (window.marked && window.DOMPurify) el.innerHTML = DOMPurify.sanitize(marked.parse(text), MARKDOWN_ONLY);
   else el.textContent = text;  // a CDN script didn't load: plain text beats unsafe HTML
@@ -92,7 +98,9 @@ const handlers = {
   token: (v, d) => { v.text += d.text; renderMarkdown(v.answer, v.text); messages.scrollTop = messages.scrollHeight; },
   done: (v, d) => {
     v.answer.classList.remove("cursor");
-    if (!v.text) v.answer.innerHTML = "<em class='muted'>(no text answer)</em>";
+    // Why an answer is cut off or missing (length limit, safety filter…), when the server says.
+    if (d.notice) v.answer.insertAdjacentHTML("beforeend", `<p class="notice">${esc(d.notice)}</p>`);
+    else if (!v.text) v.answer.innerHTML = "<em class='muted'>(no text answer)</em>";
     const total = Object.values(d.per_layer_ms).reduce((a, b) => a + b, 0) || 1;
     const bar = LAYERS.map(l => `<div class="layer-${l}" style="width:${100 * (d.per_layer_ms[l] || 0) / total}%" title="${l}: ${d.per_layer_ms[l] || 0} ms"></div>`).join("");
     const legend = LAYERS.filter(l => d.per_layer_ms[l]).map(l => `<span><span class="swatch ${l}"></span>${l} ${d.per_layer_ms[l]} ms</span>`).join("");

@@ -134,6 +134,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .barlegend { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .barlegend .swatch { margin-right: 5px; }
 .error { color: var(--danger); }
+.notice { color: var(--text-2); font-style: italic; }
 .cursor::after { content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { to { visibility: hidden; } }
 
