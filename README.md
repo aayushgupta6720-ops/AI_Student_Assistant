@@ -44,7 +44,7 @@ Stack: Python 3.12, FastAPI, Gemini (`google-genai`), SQLite + numpy, vanilla JS
  │ provider.py    │   │ store.py (sqlite+np) │   │ builtin.py      │
  │ gemini.py  ←───┼───┤ ingest.py            │   │  search_notes   │
  │  (only vendor  │   │ retrieval.py         │   │  save_note      │
- │   SDK import)  │   │                      │   │  calculator     │
+ │   SDK import)  │   │ uploads.py           │   │  calculator     │
  │                │   │                      │   │  current_datetime│
  │                │   │                      │   │  fetch_url      │
  └────────────────┘   └──────────────────────┘   └─────────────────┘
@@ -89,7 +89,9 @@ The server logs the same thing as one JSON line per call:
 per-layer totals don't double count (`tools.search_notes` wraps
 `inference.embed_query`). What visitors type, and the text of tool
 arguments, is logged as its length: it can hold a private note ("Save a note
-titled…"), and the log would keep it long after the note's 24 hours. Set
+titled…"), and the log would keep it long after the note's 24 hours. A
+private note's name is its title or file name, so it's logged as
+`<private>` among the sources and as a length on upload. Set
 `LOG_CHAT_TEXT=true` to log the text itself while debugging.
 
 A turn that ends early says why under the answer: cut off at the model's
@@ -146,6 +148,18 @@ notes at a time, uploads and saved notes together. The whole app keeps at most
 10,000 private chunks (`MAX_PRIVATE_CHUNKS`), since search holds them all in
 memory: that took the process from 86 MB to a 205 MB peak, on a free
 instance with 512 MB. Past it, uploads get a 503 until older notes expire.
+A private note's id is its file name or title in any script (`биология`,
+`生物`), and never a shared note's: "Reading List.md" becomes `reading-list-2`,
+or searches and source chips would mix the two up. Text files saved on
+Windows (CRLF line endings, a byte-order mark) are read like any other.
+
+PDFs, uploaded or linked, are the one input where a few KB can cost a lot:
+pypdf holds ~55 bytes per byte of a page's drawing instructions and parses
+them at ~2 MB/s in pure Python, and by default expands a compressed stream to
+75 MB. A 13 KB PDF took the process from 66 MB to a 496 MB peak. So no
+stream expands past 2 MB, pages with over 512 KB of instructions (drawings; a
+page of text is tens of KB) are skipped, and a PDF gets at most 4 MB of
+instructions parsed; that one is now refused in under 0.1 s.
 
 A search returns up to 4 passages (`search_notes` takes 1 to 10), minus any
 scoring more than 0.1 below the best match (`RETRIEVAL_SCORE_MARGIN`), so
@@ -165,11 +179,15 @@ passing a session id through every tool. `save_note` never writes to
 
 What the tools refuse: `fetch_url` only fetches public http(s) addresses (not
 localhost, private networks or cloud metadata endpoints), checks every
-redirect, reads at most 2 MB, and gives up after 20 s. It reads PDF links
-too (up to 10 MB, since a PDF can't be read from a prefix), with the same
-pypdf extraction as uploads, stopping once it has enough text; other files
-(images, zips) are refused before download rather than decoded as garbage
-text. `calculator` refuses
+redirect, reads at most 2 MB, and gives up after 20 s. It resolves the host
+once, checks every address, and connects to the one it checked (sending the
+real name in `Host` and for TLS), so a DNS server that answers "public" to the
+check and "private" to a second lookup gets nowhere: before, the GET reached
+the private address before the response was refused. It reads PDF links too
+(up to 10 MB, since a PDF can't be read from a prefix), recognised by their
+first bytes rather than their headers or address, with the same pypdf
+extraction and limits as uploads, stopping once it has enough text; other
+files (images, zips) are refused rather than decoded as garbage text. `calculator` refuses
 results over about 1,200 digits, since it runs on the event loop and a
 `9**9**9` would stall every chat, and results JSON can't carry (`inf`, `nan`,
 or a complex number from `(-8)**(1/3)`). The registry turns any tool result
@@ -189,7 +207,11 @@ The free-tier quota is shared by everyone using the app, so each visitor
 (an IP address; for IPv6, its /64) gets its own allowance: 6 chat messages a
 minute and 30 a day, 10 uploads an hour and 3 re-ingests an hour. Uploads
 also count their chunks, 1,000 a day: a file can be ~500 chunks to embed and
-keep in memory, and new sessions don't reset it. Over a limit, the endpoint
+keep in memory, and new sessions don't reset it. Notes saved from chat count
+against the same budget (and hold at most 200,000 characters), or chat alone
+could fill the server-wide cap. A chat message is counted once it's valid, so
+an over-long one (the page checks the 8,000-character limit before sending)
+doesn't use up the minute's allowance. Over a limit, the endpoint
 returns a 429 with a `Retry-After` header, and the chat says how long to
 wait. The model isn't called for a refused request, and an upload over its
 chunk budget is refused before anything is embedded. Change the numbers
@@ -244,10 +266,13 @@ Pick the repo through your connected GitHub account rather than pasting its
 public URL: Render only deploys on push for a repo connected through the
 account, and a public-URL service has to be deployed by hand.
 
-Render's filesystem is ephemeral, so the app re-ingests `data/notes/*.md`
-on startup whenever the index is empty. If that fails (a Gemini quota 429,
-a bad key), the app still boots and logs `startup_ingest_failed`; chat works
-but `search_notes` finds nothing until `POST /ingest` succeeds. Private
+Render's filesystem is ephemeral, so the index is empty after every deploy;
+the app syncs it with `data/notes/*.md` on every startup, which elsewhere
+costs nothing for unchanged notes and re-embeds everything after an
+embedding-model change (private notes from another model are dropped: their
+vectors can't be searched with the new ones). If that fails (a Gemini quota
+429, a bad key), the app still boots and logs `startup_ingest_failed`; chat
+works but `search_notes` finds nothing new until `POST /ingest` succeeds. Private
 notes (uploads and `save_note`) live in the same index, so a deploy or
 restart also clears them. The free plan sleeps after inactivity, so the
 first request after a while takes ~30–60 s.
@@ -308,7 +333,8 @@ Because each layer only depends on the contract below it, swapping one is local:
   needs echoed back (Gemini's `thought_signature`) rides along in
   `provider_state` on parts, opaque to every other layer.
 - **Real vector database** → replace `app/knowledge/store.py` with a
-  Qdrant/pgvector client exposing the same five methods.
+  Qdrant/pgvector client exposing the same methods (upsert, search, list,
+  delete and purge by owner, and the `embedded_with` check re-ingesting uses).
 - **New tool** → add a `Tool(name, description, json_schema, handler)` in
   `app/tools/builtin.py`. The model sees it on the next request.
 - **Different client** → anything that can POST JSON and read SSE (a CLI,
@@ -323,14 +349,14 @@ app/
   main.py                composition root
   config.py              settings from .env
   observability.py       time_step(layer, name) tracing shared by all layers
-  api/routes.py          HTTP edge: AgentEvents → SSE
+  api/                   routes.py (HTTP edge: AgentEvents → SSE), ratelimit.py, body_limit.py
   intelligence/          agent.py, memory.py, prompts.py
   inference/             types.py, provider.py, gemini.py
-  knowledge/             chunking.py, store.py, ingest.py, retrieval.py
+  knowledge/             chunking.py, store.py, ingest.py, retrieval.py, uploads.py
   tools/                 registry.py, builtin.py
 client/                  index.html, app.js, style.css
 data/notes/*.md          the knowledge base (5 sample notes)
 data/knowledge.sqlite    built by scripts/ingest.py
-scripts/ingest.py
+scripts/                ingest.py (sync data/notes), eval_routing.py (live tool-routing check)
 tests/
 ```

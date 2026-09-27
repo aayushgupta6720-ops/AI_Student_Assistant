@@ -90,3 +90,30 @@ def test_hard_split_windows_after_the_first_carry_the_paragraphs_own_heading():
 
     assert chunks[0].headings == []
     assert all(c.headings == ["# T", "## Long"] for c in chunks[1:])
+
+
+def test_a_comment_in_a_code_block_is_not_a_heading():
+    # Splitting on blank lines alone made "# add up the squares" the title of
+    # every chunk after the code block.
+    note = (
+        "# Python notes\n\n## Functions\n\nDefine one with def.\n\n"
+        "```python\ndef total(xs):\n\n    # add up the squares\n    return sum(x * x for x in xs)\n```\n\n"
+        "Call it with a list of numbers to get the total of their squares."
+    )
+
+    chunks = chunk_markdown(note, max_chars=80, overlap=0)
+
+    assert all(c.headings in ([], ["# Python notes"], ["# Python notes", "## Functions"]) for c in chunks)
+    assert chunks[-1].headings == ["# Python notes", "## Functions"]
+    assert any("# add up the squares" in c.text and "def total" in c.text for c in chunks)  # the code stays whole
+
+
+def test_a_heading_right_after_a_list_starts_its_section():
+    # Without a blank line before it, the heading was read as another list
+    # line, and its section was labelled with the one before.
+    note = "# Trip\n\n## Packing\n\n- socks\n- hat\n## Day of travel\n\nLeave at 6 and check the train times."
+
+    chunks = chunk_markdown(note, max_chars=60, overlap=0)
+
+    [leave] = [c for c in chunks if "Leave at 6" in c.text]
+    assert leave.headings == ["# Trip"] and leave.text.startswith("## Day of travel")

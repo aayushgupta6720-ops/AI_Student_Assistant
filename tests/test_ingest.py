@@ -148,3 +148,28 @@ async def test_app_still_boots_when_the_startup_ingest_fails(tmp_path, store, mo
     async with main.lifespan(main.app):
         assert main.app.state.store.count() == 0
         assert main.app.state.agent is not None
+
+
+async def test_startup_syncs_the_index_and_drops_private_notes_from_another_model(tmp_path, store, monkeypatch):
+    # Startup only indexed an empty store, so after an embedding-model change
+    # search broke (vectors of two sizes) until someone re-ingested by hand.
+    from app.config import get_settings
+    from app.knowledge.ingest import chunk_note, embedded_with
+
+    notes = tmp_path / "notes"
+    _write(notes, "same", "unchanged note")
+    _write(notes, "old", "embedded by the previous model")
+    monkeypatch.setattr(get_settings(), "notes_dir", notes)
+    store.upsert_doc("same", chunk_note("unchanged note"), [[1.0] * 4], embedded_with=embedded_with())
+    store.upsert_doc("old", chunk_note("embedded by the previous model"), [[1.0] * 8], embedded_with="old-model@8")
+    store.upsert_doc("mine", ["private"], [[1.0] * 8], owner="alice", embedded_with="old-model@8")
+    provider = CountingProvider()
+    monkeypatch.setattr(main, "get_store", lambda: store)
+    monkeypatch.setattr(main, "get_provider", lambda: provider)
+
+    async with main.lifespan(main.app):
+        assert provider.embedded == ["embedded by the previous model"]  # "same" skipped
+        assert store.list_docs(owner="alice") == [
+            {"doc_id": "old", "chunks": 1, "uploaded": False}, {"doc_id": "same", "chunks": 1, "uploaded": False},
+        ]  # alice's note from the old model is gone: it can't be embedded again
+        assert len(store.search([1.0] * 4, k=5, owner="alice")) == 2  # one vector size again

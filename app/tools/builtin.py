@@ -25,7 +25,7 @@ from app.inference.provider import LLMProvider
 from app.knowledge.ingest import slugify
 from app.knowledge.retrieval import current_session, get_store, retrieve
 from app.knowledge.store import VectorStore
-from app.knowledge.uploads import UPLOAD_TTL_S, UploadError, pdf_text, store_private_note
+from app.knowledge.uploads import MAX_UPLOAD_CHARS, UPLOAD_TTL_S, UploadError, pdf_text, store_private_note
 from app.tools.registry import Tool, ToolRegistry
 
 # ---- calculator: a safe arithmetic evaluator (no eval()) --------------------
@@ -173,27 +173,28 @@ def _refuse_private(ip: str, host: str) -> None:
         raise ValueError(f"{host} is a private or local address; only public web pages can be fetched")
 
 
-async def _check_public_url(url: httpx.URL) -> None:
-    """Refuse anything but http(s) to public addresses. The server can reach
-    places a visitor can't (itself, its host's private network, cloud metadata
-    endpoints), and fetch_url must not become a way in."""
+async def _resolve(host: str, port: int | None) -> list[str]:
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"couldn't resolve {host}") from exc
+    return [sockaddr[0] for *_, sockaddr in infos]
+
+
+async def _public_address(url: httpx.URL) -> str:
+    """The address to connect to for `url`, once every address its host
+    resolves to has been checked as public. The server can reach places a
+    visitor can't (itself, its host's private network, cloud metadata
+    endpoints), and fetch_url must not become a way in. The caller connects to
+    exactly this address: letting httpx look the host up again allowed DNS
+    rebinding, a second answer naming a private address, and a GET went there
+    before the old check on the connected peer could refuse the response."""
     if url.scheme not in ("http", "https") or not url.host:
         raise ValueError("only absolute http(s) URLs can be fetched")
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(url.host, url.port, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise ValueError(f"couldn't resolve {url.host}") from exc
-    for *_, sockaddr in infos:
-        _refuse_private(sockaddr[0], url.host)
-
-
-def _check_connected_peer(response: httpx.Response, host: str) -> None:
-    """Check the address actually connected to as well, in case DNS answered
-    differently from when _check_public_url asked (DNS rebinding)."""
-    stream = response.extensions.get("network_stream")
-    peer = stream.get_extra_info("server_addr") if stream else None
-    if peer:
-        _refuse_private(peer[0], host)
+    addresses = await _resolve(url.raw_host.decode("ascii"), url.port)
+    for ip in addresses:
+        _refuse_private(ip, url.host)
+    return addresses[0]
 
 
 async def _read_capped(response: httpx.Response, limit: int) -> bytes:
@@ -206,43 +207,58 @@ async def _read_capped(response: httpx.Response, limit: int) -> bytes:
     return bytes(body)
 
 
-def _is_pdf(response: httpx.Response) -> bool:
-    kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
-    return kind == "application/pdf" or response.url.path.lower().endswith(".pdf")
+_OCTET_TYPES = ("application/octet-stream", "binary/octet-stream")
 
 
-def _refuse_binary(response: httpx.Response) -> None:
-    kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
-    if kind and not kind.startswith(_TEXT_TYPES) and not _is_pdf(response):
+def _content_type(response: httpx.Response) -> str:
+    return response.headers.get("content-type", "").split(";")[0].strip().lower()
+
+
+def _may_be_pdf(url: httpx.URL, response: httpx.Response) -> bool:
+    """Whether the body could be a PDF, so it's read with the PDF cap. Whether
+    it is one is decided by its first bytes: servers send PDFs as generic
+    downloads, and a login page can sit at a .pdf address."""
+    kind = _content_type(response)
+    return (kind == "application/pdf" or kind in _OCTET_TYPES
+            or (url.path.lower().endswith(".pdf") and not kind.startswith(_TEXT_TYPES)))
+
+
+def _refuse_binary(url: httpx.URL, response: httpx.Response) -> None:
+    kind = _content_type(response)
+    if kind and not kind.startswith(_TEXT_TYPES) and not _may_be_pdf(url, response):
         raise ValueError(f"that link is {kind}, not a web page, text or PDF, so it can't be read")
 
 
-async def _get_public_page(url: httpx.URL) -> tuple[httpx.Response, bytes]:
-    # Redirects are followed by hand so every hop gets the address check, and
-    # trust_env=False connects directly, so the peer checked is the page's
-    # own server rather than a proxy.
+async def _get_public_page(url: httpx.URL) -> tuple[httpx.URL, httpx.Response, bytes]:
+    """The final URL after redirects, its response and up to a cap of its body.
+    Redirects are followed by hand so every hop gets the address check, and
+    trust_env=False connects directly rather than through a proxy."""
     async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
         for _ in range(MAX_FETCH_REDIRECTS + 1):
-            await _check_public_url(url)
-            async with client.stream("GET", url, headers={"User-Agent": "AI_Student_Assistant/0.1"}) as response:
-                _check_connected_peer(response, url.host)
-                if response.next_request is not None:
-                    url = response.next_request.url
+            address = await _public_address(url)
+            async with client.stream(
+                "GET",
+                url.copy_with(host=address),  # the checked address: no second DNS lookup
+                headers={"User-Agent": "AI_Student_Assistant/0.1", "Host": url.netloc.decode("ascii")},
+                extensions={"sni_hostname": url.raw_host.decode("ascii")},  # TLS checks the real name
+            ) as response:
+                if response.is_redirect:
+                    url = url.join(response.headers["location"])
                     continue
                 response.raise_for_status()
-                _refuse_binary(response)  # before downloading it
-                limit = MAX_FETCH_PDF_BYTES if _is_pdf(response) else MAX_FETCH_BYTES
-                return response, await _read_capped(response, limit)
+                _refuse_binary(url, response)  # before downloading it
+                limit = MAX_FETCH_PDF_BYTES if _may_be_pdf(url, response) else MAX_FETCH_BYTES
+                return url, response, await _read_capped(response, limit)
     raise ValueError(f"more than {MAX_FETCH_REDIRECTS} redirects")
 
 
 async def fetch_url(url: str, max_chars: int = 4000) -> dict:
     try:
         async with asyncio.timeout(FETCH_DEADLINE_S):
-            response, body = await _get_public_page(httpx.URL(url))
+            final_url, response, body = await _get_public_page(httpx.URL(url))
     except TimeoutError as exc:
         raise TimeoutError(f"gave up after {FETCH_DEADLINE_S:g}s") from exc
-    if _is_pdf(response):
+    if b"%PDF-" in body[:1024]:  # a PDF by its content, whatever the headers said
         if len(body) >= MAX_FETCH_PDF_BYTES:
             raise ValueError(f"that PDF is over {MAX_FETCH_PDF_BYTES // (1024 * 1024)} MB, too big to read")
         try:
@@ -250,12 +266,14 @@ async def fetch_url(url: str, max_chars: int = 4000) -> dict:
             text = await asyncio.to_thread(pdf_text, body, max_chars)
         except UploadError as exc:
             raise ValueError(str(exc)) from exc
-        return {"url": str(response.url), "status": response.status_code, "type": "pdf", "text": text[:max_chars]}
+        return {"url": str(final_url), "status": response.status_code, "type": "pdf", "text": text[:max_chars]}
+    if _content_type(response) in ("application/pdf", *_OCTET_TYPES):
+        raise ValueError("that link isn't a web page, text or a readable PDF")
     try:
         html = body.decode(response.charset_encoding or "utf-8", errors="replace")
     except LookupError:  # a charset Python doesn't know
         html = body.decode("utf-8", errors="replace")
-    return {"url": str(response.url), "status": response.status_code, "type": "page", "text": _visible_text(html, max_chars)}
+    return {"url": str(final_url), "status": response.status_code, "type": "page", "text": _visible_text(html, max_chars)}
 
 
 # ---- search_notes / save_note ---------------------------------------------------
@@ -267,14 +285,16 @@ def _note_id(store: VectorStore, session_id: str | None, title: str) -> str:
     """The doc_id for a note titled `title` among the session's notes. Saving
     under an existing title overwrites that note; a different title that
     slugifies the same ("C notes" vs "C++ notes") gets the next free "-2",
-    "-3"... suffix instead."""
+    "-3"... suffix instead, and so does one named like a shared note."""
     slug = slugify(title)
+    shared = {d["doc_id"] for d in store.list_docs()}
     n = 1
     while True:
         doc_id = slug if n == 1 else f"{slug}-{n}"
-        heading = store.first_line(doc_id, owner=session_id)
-        if heading is None or heading.lstrip("#").strip().casefold() == title.casefold():
-            return doc_id
+        if doc_id not in shared:
+            heading = store.first_line(doc_id, owner=session_id)
+            if heading is None or heading.lstrip("#").strip().casefold() == title.casefold():
+                return doc_id
         n += 1
 
 
@@ -303,6 +323,8 @@ def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> T
         # every visitor, so a note saved there could be read, and overwritten,
         # by anyone using the app.
         session_id = current_session.get()
+        if len(content) > MAX_UPLOAD_CHARS:  # the same cap as an uploaded file's text
+            raise ValueError(f"notes can hold up to {MAX_UPLOAD_CHARS:,} characters")
         title = " ".join(title.split())  # one line, so it stays the note's "# Title"
         doc_id = _note_id(store, session_id, title)
         text = f"# {title}\n\n{content.strip()}\n"

@@ -15,7 +15,7 @@ from app.config import PROJECT_ROOT, get_settings
 from app.inference.gemini import get_provider          # inference layer
 from app.intelligence.agent import Agent                # intelligence layer
 from app.intelligence.memory import SessionStore
-from app.knowledge.ingest import ingest_dir
+from app.knowledge.ingest import embedded_with, ingest_dir
 from app.knowledge.retrieval import get_store           # knowledge layer
 from app.knowledge.uploads import MAX_UPLOAD_BYTES, UPLOAD_TTL_S
 from app.observability import configure_logging, log_event
@@ -34,17 +34,23 @@ async def lifespan(app: FastAPI):
     memory = SessionStore(settings.memory_window_messages, settings.max_sessions)
 
     store.purge_uploads(UPLOAD_TTL_S)
+    stale = store.purge_stale_private(embedded_with())
+    if stale:
+        log_event(event="stale_private_notes_dropped", chunks=stale)
 
-    # On hosts with an ephemeral filesystem (Render, Cloud Run) the index is
-    # gone after every deploy, so build it on boot if it's empty.
-    if store.count() == 0 and settings.notes_dir.exists():
+    # Sync the index with data/notes on every start. On an ephemeral disk
+    # (Render, Cloud Run) it's empty after each deploy; elsewhere unchanged
+    # notes cost nothing, and changed ones, or all of them after an embedding
+    # model change, are embedded again. Only syncing an empty index left a
+    # model change breaking search until someone re-ingested by hand.
+    if settings.notes_dir.exists():
         try:
             counts = await ingest_dir(settings.notes_dir, store, provider)
             log_event(event="startup_ingest", docs=len(counts), chunks=store.count())
         except Exception as exc:
             # A quota 429, a bad key or a network blip shouldn't keep the whole
-            # app down: chat still works, search_notes just finds nothing
-            # until POST /ingest succeeds.
+            # app down: chat still works, and search_notes finds whatever was
+            # already indexed (nothing, on a fresh disk) until POST /ingest succeeds.
             log_event(
                 event="startup_ingest_failed",
                 error=f"{type(exc).__name__}: {exc}",

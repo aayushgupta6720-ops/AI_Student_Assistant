@@ -9,6 +9,7 @@ from app.api.ratelimit import build_rate_limiters
 from app.config import get_settings
 from app.inference.provider import ModelOverloadedError, ModelTimeoutError, QuotaExceededError
 from app.intelligence.agent import AgentDone
+from app.knowledge.store import VectorStore
 from app.observability import CallTrace, StepRecord
 
 
@@ -22,6 +23,9 @@ class QuotaAgent:
 
 
 async def _chat_events(monkeypatch, agent) -> list[tuple[str, dict]]:
+    store = VectorStore(":memory:")
+    store.upsert_doc("reading-list", ["# Reading list"], [[1.0, 0.0]])  # a shared note
+    monkeypatch.setattr(main.app.state, "store", store, raising=False)
     monkeypatch.setattr(main.app.state, "agent", agent, raising=False)
     monkeypatch.setattr(main.app.state, "rate_limiters", build_rate_limiters(get_settings()), raising=False)
     transport = httpx.ASGITransport(app=main.app)
@@ -84,8 +88,9 @@ class SavingAgent:
         trace = CallTrace()
         trace.add(StepRecord("tools", "save_note", 1.0, 1.0, depth=1,
                              meta={"args": {"title": "Bank", "content": "PIN 4321"}}))
-        yield AgentDone(answer="Saved.", sources=["bank"], iterations=2, trace=trace, tools_used=["save_note"],
-                        passages={"bank": ["# Bank\n\nPIN 4321"]})
+        yield AgentDone(answer="Saved.", sources=["reading-list", "bank-pin-4321"], iterations=2, trace=trace,
+                        tools_used=["save_note"],
+                        passages={"bank-pin-4321": ["# Bank\n\nPIN 4321"]})
 
 
 async def test_the_log_keeps_the_length_of_what_was_typed_not_the_text(monkeypatch):
@@ -99,9 +104,10 @@ async def test_the_log_keeps_the_length_of_what_was_typed_not_the_text(monkeypat
     [call] = [f for f in logged if f["event"] == "chat_call"]
     assert call["query"] == "<2 chars>"
     assert call["steps"][0]["meta"] == {"args": {"title": "<4 chars>", "content": "<8 chars>"}}
-    assert "PIN" not in json.dumps(call) and call["tools_used"] == ["save_note"]
+    assert call["sources"] == ["reading-list", "<private>"]  # a private note's id is its title
+    assert "PIN" not in json.dumps(call).upper() and call["tools_used"] == ["save_note"]
     assert events["done"]["steps"][0]["meta"]["args"]["content"] == "PIN 4321"  # the chat still sees it all
-    assert events["done"]["passages"] == {"bank": ["# Bank\n\nPIN 4321"]}  # for the source chips, never the log
+    assert events["done"]["passages"] == {"bank-pin-4321": ["# Bank\n\nPIN 4321"]}  # for the source chips, never the log
 
 
 async def test_log_chat_text_logs_the_text_for_debugging(monkeypatch):

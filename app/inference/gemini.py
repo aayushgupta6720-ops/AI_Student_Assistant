@@ -257,7 +257,8 @@ class GeminiProvider:
             candidate = chunk.candidates[0]
             if candidate.finish_reason:
                 finish_reason = _FINISH_REASONS.get(candidate.finish_reason.name, "other")
-            for part in candidate.content.parts or []:
+            # A blocked answer can come back with a finish reason and no content at all.
+            for part in (candidate.content.parts if candidate.content else None) or []:
                 state = (
                     {"thought_signature": part.thought_signature}
                     if part.thought_signature

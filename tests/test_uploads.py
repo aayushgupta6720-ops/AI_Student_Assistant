@@ -1,3 +1,4 @@
+import json
 import time
 import tracemalloc
 import zlib
@@ -84,6 +85,17 @@ def test_a_small_pdf_with_too_much_text_is_refused(monkeypatch):
     monkeypatch.setattr(uploads, "MAX_UPLOAD_CHARS", 10)
     with pytest.raises(UploadError, match="over 10 characters"):
         extract_text("dense.pdf", _pdf("far more than ten characters"))
+
+
+@pytest.mark.parametrize("encode", [
+    lambda text: text.replace("\n", "\r\n").encode(),  # saved on Windows
+    lambda text: b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode(),  # ...with a byte-order mark
+])
+def test_windows_text_files_read_like_any_other(encode):
+    note = "# Biology lectures\n\n## Week 1\n\nCells.\n\n## Week 2\n\nMitosis."
+
+    assert extract_text("bio.md", encode(note)) == note
+    assert as_note("bio.md", extract_text("bio.md", encode(note)))[1].startswith("# Biology lectures\n")
 
 
 def test_notes_without_a_title_get_one_from_the_file_name():
@@ -330,3 +342,49 @@ async def test_upload_errors_come_back_as_400_with_the_reason(api):
 
     assert r.status_code == 400
     assert "Only .md, .txt, .pdf" in r.json()["detail"]
+
+
+async def test_notes_saved_from_chat_count_against_the_daily_chunk_budget(api, store, monkeypatch):
+    # save_note didn't charge the budget, so chat alone could fill the
+    # server-wide private-chunk cap and lock everyone's uploads out.
+    settings = get_settings()
+    monkeypatch.setattr(settings, "upload_chunk_limit_per_day", 3)
+    monkeypatch.setattr(main.app.state, "rate_limiters", build_rate_limiters(settings))
+    essay = TWO_CHUNKS.decode()
+    provider = FakeProvider([
+        tool_turn("save_note", {"title": "Essay", "content": essay}), text_turn("Saved."),
+        tool_turn("save_note", {"title": "Essay two", "content": essay}), text_turn("Couldn't save it."),
+    ])
+    monkeypatch.setattr(main.app.state, "agent", Agent(provider, build_registry(provider, store), SessionStore()),
+                        raising=False)
+
+    async def saved(session):
+        r = await api.post("/chat", json={"session_id": session, "message": "save my essay"})
+        [result] = [json.loads(block.split("data: ", 1)[1]) for block in r.text.split("\n\n")
+                    if block.startswith("event: tool_result")]
+        return result
+
+    assert not (await saved("alice"))["is_error"]  # 2 of the 3 chunks
+    refused = await saved("new-session")
+    assert refused["is_error"] and "over the limit of 3 note chunks a day" in refused["preview"]
+    assert store.private_count() == 2
+    assert (await _upload(api, "bob", "big.md", TWO_CHUNKS)).status_code == 429  # same visitor, same budget
+
+
+async def test_uploads_with_non_latin_names_are_kept_apart(store):
+    # Every non-Latin name used to become "note", so each upload replaced the last.
+    for name in ("Биология.md", "Химия.md", "生物.txt"):
+        await ingest_upload("alice", name, b"text", store, FakeProvider(turns=[]))
+
+    assert {d["doc_id"] for d in store.list_docs(owner="alice") if d["uploaded"]} == {"биология", "химия", "生物"}
+
+
+async def test_a_private_note_never_takes_a_shared_notes_id(store):
+    # Sharing an id mixed the two notes up in searches and source chips.
+    provider = FakeProvider(turns=[])
+    upload = await ingest_upload("alice", "Shared Note.md", b"mine", store, provider)
+    current_session.set("bob")
+    saved = await build_registry(provider, store).execute("save_note", {"title": "Shared note", "content": "mine"})
+
+    assert upload["doc_id"] == "shared-note-2" and saved.result["doc_id"] == "shared-note-2"
+    assert store.first_line("shared-note") is not None  # the shared note itself untouched

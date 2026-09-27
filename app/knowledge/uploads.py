@@ -4,6 +4,7 @@ that session's searches can see it (see store.py). They expire with the
 session, or after UPLOAD_TTL_S, whichever comes first."""
 
 import asyncio
+import contextvars
 import io
 from pathlib import Path
 from typing import Callable
@@ -13,7 +14,7 @@ from pypdf.errors import LimitReachedError
 
 from app.config import get_settings
 from app.inference.provider import LLMProvider
-from app.knowledge.ingest import chunk_note, slugify
+from app.knowledge.ingest import chunk_note, embedded_with, slugify
 from app.knowledge.store import VectorStore
 from app.observability import time_step
 
@@ -40,6 +41,14 @@ _PDF_LIMITS = dict.fromkeys(
     MAX_PDF_STREAM_BYTES,
 )
 ALLOWED_SUFFIXES = (".md", ".txt", ".pdf")
+
+
+# The API's per-visitor chunk budget, for notes save_note stores: that runs
+# inside the agent, far from the request that knows who the visitor is. The
+# chat route sets it each turn; unset, nothing is charged.
+note_charge: contextvars.ContextVar[Callable[[int], None] | None] = contextvars.ContextVar(
+    "note_charge", default=None
+)
 
 
 class UploadError(ValueError):
@@ -106,9 +115,13 @@ def extract_text(filename: str, data: bytes) -> str:
         text = pdf_text(data, MAX_UPLOAD_CHARS)
     else:
         try:
-            text = data.decode("utf-8")
+            # utf-8-sig drops a byte-order mark, which hid a note's own "# Title".
+            text = data.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
             raise UploadError("That file isn't UTF-8 text.") from exc
+        # Windows line endings: the chunker splits paragraphs on "\n\n", so a
+        # CRLF file was one long paragraph, cut every 700 chars mid-word.
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         if not text.strip():
             raise UploadError("That file is empty.")
 
@@ -116,6 +129,18 @@ def extract_text(filename: str, data: bytes) -> str:
     if len(text) > MAX_UPLOAD_CHARS:
         raise UploadError(f"That file has over {MAX_UPLOAD_CHARS:,} characters of text. Split it into smaller files.")
     return text
+
+
+def clear_of_shared(store: VectorStore, doc_id: str) -> str:
+    """doc_id, or doc_id-2, -3...: the first that no shared note uses. A private
+    note named like a shared one ("Reading List.md") would otherwise share its
+    doc_id, and searches, source chips and their passages would mix them up."""
+    shared = {d["doc_id"] for d in store.list_docs()}
+    n, candidate = 1, doc_id
+    while candidate in shared:
+        n += 1
+        candidate = f"{doc_id}-{n}"
+    return candidate
 
 
 def as_note(filename: str, text: str) -> tuple[str, str]:
@@ -140,7 +165,8 @@ async def store_private_note(
     """Chunk, embed and store `text` as one of `session_id`'s private notes.
     Storing a doc_id the session already has replaces that note. `charge` is
     called with the chunk count once the note is accepted, before anything is
-    embedded, and may raise to refuse it (the API's per-visitor budget)."""
+    embedded, and may raise to refuse it (the API's per-visitor budget);
+    without one, note_charge's is used."""
     if not session_id:
         raise UploadError("Private notes need a session.")
 
@@ -160,12 +186,13 @@ async def store_private_note(
             "The assistant is holding as many private notes as it has room for. "
             "Try again later, once older notes have expired."
         )
+    charge = charge or note_charge.get()
     if charge is not None:
         charge(len(chunks))
     with time_step("inference", "embed_documents", doc_id=doc_id, chunks=len(chunks)):
         embeddings = await provider.embed(chunks, "document")
     with time_step("knowledge", "store_upsert", doc_id=doc_id):
-        store.upsert_doc(doc_id, chunks, embeddings, owner=session_id)
+        store.upsert_doc(doc_id, chunks, embeddings, owner=session_id, embedded_with=embedded_with())
     return {"doc_id": doc_id, "chunks": len(chunks)}
 
 
@@ -184,4 +211,5 @@ async def ingest_upload(
     # PDF parsing is CPU-bound: off the event loop, so other chats keep streaming.
     text = await asyncio.to_thread(extract_text, filename, data)
     doc_id, text = as_note(filename, text)
+    doc_id = clear_of_shared(store, doc_id)
     return await store_private_note(session_id, doc_id, text, store, provider, charge)

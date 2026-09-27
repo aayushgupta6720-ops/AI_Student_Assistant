@@ -140,6 +140,19 @@ class VectorStore:
             "SELECT COUNT(*) FROM chunks WHERE owner = ? OR owner = ?", (SHARED, owner or SHARED)
         ).fetchone()[0]
 
+    def purge_stale_private(self, embedded_with: str) -> int:
+        """Delete private notes embedded with anything but `embedded_with`.
+        Their vectors can't be searched alongside current ones (a different
+        size broke every visitor's search), and unlike the shared notes they
+        can't be embedded again. Returns how many chunks went."""
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM chunks WHERE owner != ? AND embedded_with != ?", (SHARED, embedded_with)
+            )
+        if cur.rowcount:
+            self._cache = None
+        return cur.rowcount
+
     def private_count(self) -> int:
         """Chunks of private notes, across every session."""
         return self._conn.execute("SELECT COUNT(*) FROM chunks WHERE owner != ?", (SHARED,)).fetchone()[0]

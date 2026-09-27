@@ -213,6 +213,12 @@ class Agent:
             # -- 3. feed results back and loop --------------------------------
             self._remember(session_id, turn, Message("tool", result_parts))
 
+        if not "".join(answer_parts).strip():
+            # No answer at all (blocked, or empty): like a stopped turn, leave
+            # no trace, or the next message gets answered along with this one
+            # (and a blocked question could keep getting later turns blocked).
+            self._abandon(session_id, turn, "")
+
         yield AgentDone(
             answer="".join(answer_parts),
             sources=sources,

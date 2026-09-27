@@ -29,6 +29,7 @@ from app.knowledge.uploads import (
     PrivateNotesFullError,
     UploadError,
     ingest_upload,
+    note_charge,
 )
 from app.observability import log_event
 
@@ -77,6 +78,16 @@ def _loggable(value):
     if isinstance(value, list):
         return [_loggable(v) for v in value]
     return value  # numbers, bools, None: no text in them
+
+
+def _loggable_sources(request: Request, sources: list[str]) -> list[str]:
+    """Source doc_ids as the log may keep them: a private note's is its title
+    or file name ("bank-pin-4321"), so it's "<private>" unless LOG_CHAT_TEXT
+    is on. Private ids never equal shared ones (uploads.clear_of_shared)."""
+    if get_settings().log_chat_text:
+        return sources
+    shared = {d["doc_id"] for d in request.app.state.store.list_docs()}
+    return [s if s in shared else "<private>" for s in sources]
 
 
 def _preview(result: dict, limit: int = 300) -> dict:
@@ -132,7 +143,7 @@ async def upload_note(
         raise HTTPException(
             status_code=503, detail="The embedding model is unavailable right now, so the note couldn't be indexed. Try again later."
         ) from exc
-    log_event(event="note_uploaded", session_id=session_id, **result)
+    log_event(event="note_uploaded", session_id=session_id, doc_id=_loggable(result["doc_id"]), chunks=result["chunks"])
     return result
 
 
@@ -167,12 +178,25 @@ async def reset(session_id: str, request: Request, keep_uploads: bool = False) -
     return {"reset": session_id}
 
 
-@router.post("/chat", dependencies=[rate_limit("chat")])
+@router.post("/chat")
 async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
+    # Counted here, once the body is valid, not as a route dependency: those
+    # run before validation, so an over-long message used up an allowance.
+    charge(request, "chat")
     agent: Agent = request.app.state.agent
+
+    def charge_saved_notes(chunks: int) -> None:
+        # Notes saved from chat fill the same memory as uploads, so they count
+        # against the same daily budget. Tools report errors to the model, so
+        # it gets the reason to relay rather than an HTTP 429.
+        try:
+            charge(request, "upload_chunks", chunks)
+        except HTTPException as exc:
+            raise UploadError(exc.detail) from exc
 
     async def stream():
         started = time.perf_counter()
+        note_charge.set(charge_saved_notes)  # for save_note, like the agent's current_session
         try:
             async for ev in agent.run_turn(body.session_id, body.message, timezone=body.timezone):
                 if isinstance(ev, AgentStatus):
@@ -203,7 +227,8 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
                         query=_loggable(body.message),
                         latency_ms=round((time.perf_counter() - started) * 1000, 2),
                         # Not the passages either: they're the notes' own text.
-                        **{k: v for k, v in payload.items() if k not in ("answer", "notice", "steps", "passages")},
+                        **{k: v for k, v in payload.items() if k not in ("answer", "notice", "steps", "passages", "sources")},
+                        sources=_loggable_sources(request, ev.sources),
                         steps=[{**s, "meta": _loggable(s["meta"])} for s in payload["steps"]],
                     )
                     yield _sse("done", payload)

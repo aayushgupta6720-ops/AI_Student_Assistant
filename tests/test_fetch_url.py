@@ -18,6 +18,7 @@ PAGE = b"<html><head><style>p{color:red}</style><script>var secret=1</script></h
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         port = self.server.server_port
+        self.server.seen.append((self.path, self.headers.get("Host")))
         if self.path == "/page":
             self._send(200, PAGE)
         elif self.path == "/big":  # 20 MB, far past the read cap
@@ -37,6 +38,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, _pdf("Photosynthesis makes glucose"), "application/pdf")
         elif self.path == "/paper":  # a PDF by its type, no .pdf in the URL
             self._send(200, _pdf("Mitochondria make ATP"), "application/pdf; charset=binary")
+        elif self.path == "/download?id=42":  # a PDF sent as a generic download
+            self._send(200, _pdf("Krebs cycle"), "application/octet-stream")
+        elif self.path == "/syllabus.pdf":  # a login page where the PDF was
+            self._send(200, b"<html><body><p>Please sign in</p></body></html>")
+        elif self.path == "/data.bin":
+            self._send(200, bytes(range(256)), "application/octet-stream")
         elif self.path == "/scan.pdf":
             self._send(200, _pdf(None), "application/pdf")
         elif self.path == "/photo.png":
@@ -71,12 +78,24 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture(scope="module")
-def server():
+def _server():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     srv.daemon_threads = True
+    srv.seen = []  # (path, Host header) of every request received
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_port}"
+    yield srv
     srv.shutdown()
+
+
+@pytest.fixture
+def http_server(_server):
+    _server.seen.clear()
+    return _server
+
+
+@pytest.fixture
+def server(http_server):
+    return f"http://127.0.0.1:{http_server.server_port}"
 
 
 @pytest.fixture
@@ -112,14 +131,36 @@ async def test_checks_every_redirect_hop(server, loopback_is_public):
         await fetch_url(f"{server}/loop")
 
 
-async def test_checks_the_address_it_actually_connected_to(server, monkeypatch):
-    # DNS said public but the connection landed somewhere private (rebinding)
-    async def dns_says_public(url):
-        pass
+async def test_connects_to_the_address_it_checked(http_server, loopback_is_public, monkeypatch):
+    # httpx used to look the host up again to connect, so a rebinding DNS
+    # server could answer "public" to the check and "private" to the
+    # connection, and the GET reached the private address. Here the host only
+    # resolves through the checked lookup: a second lookup would fail.
+    lookups = []
 
-    monkeypatch.setattr(builtin, "_check_public_url", dns_says_public)
+    async def resolve(host, port):
+        lookups.append(host)
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr(builtin, "_resolve", resolve)
+    port = http_server.server_port
+
+    result = await fetch_url(f"http://rebind.invalid:{port}/page")
+
+    assert result["text"] == "Hello world" and result["url"] == f"http://rebind.invalid:{port}/page"
+    assert lookups == ["rebind.invalid"]
+    assert http_server.seen == [("/page", f"rebind.invalid:{port}")]  # the real name, for virtual hosts
+
+
+async def test_a_private_answer_is_refused_before_any_request(http_server, monkeypatch):
+    async def resolve(host, port):
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr(builtin, "_resolve", resolve)
+
     with pytest.raises(ValueError, match="private or local"):
-        await fetch_url(f"{server}/page")
+        await fetch_url(f"http://rebind.invalid:{http_server.server_port}/admin/delete-cache?confirm=1")
+    assert http_server.seen == []
 
 
 async def test_stops_reading_a_huge_page_at_the_cap(server, loopback_is_public):
@@ -160,3 +201,15 @@ async def test_reads_the_text_of_a_pdf_link(server, loopback_is_public, path, te
 async def test_says_why_it_cant_read_a_file(server, loopback_is_public, path, message):
     with pytest.raises(ValueError, match=message):
         await fetch_url(f"{server}{path}")
+
+
+async def test_a_pdf_is_recognised_by_its_content(server, loopback_is_public):
+    # A PDF sent as a generic download was refused, and a login page at a
+    # .pdf address was "a PDF that couldn't be read".
+    pdf = await fetch_url(f"{server}/download?id=42")
+    page = await fetch_url(f"{server}/syllabus.pdf")
+
+    assert pdf["type"] == "pdf" and "Krebs cycle" in pdf["text"]
+    assert page["type"] == "page" and page["text"] == "Please sign in"
+    with pytest.raises(ValueError, match="isn't a web page, text or a readable PDF"):
+        await fetch_url(f"{server}/data.bin")

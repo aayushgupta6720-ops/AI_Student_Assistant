@@ -235,3 +235,17 @@ async def test_the_passages_behind_each_source_are_collected_once():
     assert done.passages == {"reading-list": [
         "# Reading list\n\nDune", "# Reading list\n\nbooks section", "# Reading list\n\nreading section",
     ]}
+
+
+@pytest.mark.parametrize("ending", [[StreamEnd("safety")], [StreamEnd("tool_call_error")], []])
+async def test_a_turn_with_no_answer_leaves_no_question_behind(ending):
+    # Only stopped or failed turns were tidied; a blocked or empty one kept its
+    # question, so the next message was sent with both.
+    provider = FakeProvider([ending, text_turn("Paris.")])
+    memory = SessionStore()
+    agent = Agent(provider, _registry(), memory)
+
+    await _collect(agent, "s", "blocked question")
+    await _collect(agent, "s", "What's the capital of France?")
+
+    assert [(m.role, m.text()) for m in provider.seen[1]] == [("user", "What's the capital of France?")]

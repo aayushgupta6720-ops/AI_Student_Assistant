@@ -22,7 +22,10 @@ const LAYERS = ["intelligence", "inference", "knowledge", "tools"];
 // The server's own explanation (e.g. a rate limit's "try again in 40 seconds"), else the status.
 async function errorText(res) {
   const body = await res.json().catch(() => ({}));
-  return typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`;
+  if (typeof body.detail === "string") return body.detail;
+  // A validation error (422) lists its problems; "HTTP 422" told nobody anything.
+  if (Array.isArray(body.detail) && body.detail.length) return body.detail.map(d => d.msg).join("; ");
+  return `HTTP ${res.status}`;
 }
 
 async function getJSON(url, options) {
@@ -94,7 +97,8 @@ function renderMarkdown(el, text) {
 // a note that was only saved this turn has none to show.
 function sourceChips(d) {
   const passages = d.passages || {};
-  return d.sources.map(s => passages[s]
+  // hasOwn: a note called "constructor" would otherwise find Object's own.
+  return d.sources.map(s => Object.hasOwn(passages, s)
     ? `<button type="button" class="source" aria-expanded="false" data-doc="${esc(s)}">${esc(s)}</button>`
     : `<span>${esc(s)}</span>`).join("");
 }
@@ -106,7 +110,8 @@ messages.addEventListener("click", (e) => {
   footer.querySelectorAll(".source").forEach(c => c.setAttribute("aria-expanded", "false"));
   chip.setAttribute("aria-expanded", String(opening));
   // Plain text, as the note has it: where the answer's information came from.
-  panel.innerHTML = opening ? footer.passages[chip.dataset.doc].map(t => `<p>${esc(t)}</p>`).join("") : "";
+  const texts = Object.hasOwn(footer.passages, chip.dataset.doc) ? footer.passages[chip.dataset.doc] : [];
+  panel.innerHTML = opening ? texts.map(t => `<p>${esc(t)}</p>`).join("") : "";
   panel.hidden = !opening;
 });
 
@@ -131,6 +136,7 @@ const handlers = {
       `<div class="bar">${bar}</div><div class="barlegend">${legend}</div>` +
       `<div>${d.iterations} model call(s) · ${d.total_tokens} tokens · tools: ${d.tools_used.length ? d.tools_used.map(esc).join(", ") : "none"}</div>`;
     if (d.tools_used.includes("save_note")) loadSidebar();
+    announce(v.answer.textContent);
   },
   error: (v, d) => {
     v.answer.classList.remove("cursor");
@@ -140,8 +146,13 @@ const handlers = {
       message += ` That's ${at} your time.`;
     }
     v.answer.innerHTML += `<p class="error">${esc(message)}</p>`;
+    announce(message);
   },
 };
+
+// Screen readers hear each finished answer once. The answer itself isn't a
+// live region: it changes with every token and would be re-read throughout.
+function announce(text) { $("#announcer").textContent = text; }
 
 // One answer at a time. A disabled Send button isn't enough: Enter calls
 // requestSubmit(), which submits anyway, and two turns at once in one session
@@ -166,9 +177,11 @@ async function chat(text) {
   addUser(text);
   const view = addAssistant();
   controller = new AbortController();
+  let answering = false;  // the server accepted it and began answering
   try {
     const res = await fetch("/chat", { method: "POST", signal: controller.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId, message: text, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
     if (!res.ok) throw new Error(await errorText(res));
+    answering = true;
     const reader = res.body.getReader(), dec = new TextDecoder();
     let buf = "", finished = false;
     for (;;) {
@@ -194,7 +207,12 @@ async function chat(text) {
     if (e.name === "AbortError") {  // Stop: not an error, and whatever arrived stays
       view.answer.classList.remove("cursor");
       view.answer.insertAdjacentHTML("beforeend", `<p class="notice">Stopped.</p>`);
-    } else handlers.error(view, { message: e.message });
+      announce("Stopped.");
+    } else {
+      handlers.error(view, { message: e.message });
+      // Refused (a rate limit, a network error): give the draft back rather than lose it.
+      if (!answering && !input.value) { input.value = text; resizeInput(); }
+    }
   } finally {
     controller = null;
     setBusy(false); input.focus();
@@ -204,7 +222,15 @@ async function chat(text) {
 // While an answer streams, Enter leaves the draft in the box rather than dropping it.
 $("#composer").addEventListener("submit", (e) => { e.preventDefault(); const t = input.value.trim(); if (!t || busy) return; input.value = ""; input.style.height = "auto"; chat(t); });
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#composer").requestSubmit(); } });
-input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; });
+// The server refuses messages over 8,000 characters (ChatRequest); say so
+// before sending, and keep the draft, instead of a 422 after it's cleared.
+const MAX_MESSAGE_CHARS = 8000;
+function resizeInput() {
+  input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  input.setCustomValidity(input.value.length > MAX_MESSAGE_CHARS
+    ? `Messages can be up to ${MAX_MESSAGE_CHARS.toLocaleString()} characters; this one has ${input.value.length.toLocaleString()}.` : "");
+}
+input.addEventListener("input", resizeInput);
 // On narrow screens the sidebar is a drawer (see style.css); on wide ones these are no-ops.
 const menuBtn = $("#menu");
 function setDrawer(open) {

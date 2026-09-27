@@ -11,7 +11,9 @@ from app.observability import time_step
 
 
 def slugify(title: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    # Letters and digits in any script: [a-z0-9] alone turned every Cyrillic,
+    # CJK or Devanagari name into "note", so those uploads replaced each other.
+    slug = re.sub(r"[\W_]+", "-", title.lower()).strip("-")
     return slug or "note"
 
 

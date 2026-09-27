@@ -222,6 +222,9 @@ def _finished(reason: str) -> types.GenerateContentResponse:
         (_finished("RECITATION"), "recitation"),
         (_finished("MALFORMED_FUNCTION_CALL"), "tool_call_error"),
         (_finished("LANGUAGE"), "other"),
+        # A blocked answer with no content at all: crashed before, as an AttributeError.
+        (types.GenerateContentResponse.model_validate({"candidates": [{"finishReason": "SAFETY", "index": 0}]}),
+         "safety"),
         # The prompt itself blocked: no candidates, just prompt feedback.
         (types.GenerateContentResponse(prompt_feedback=types.GenerateContentResponsePromptFeedback(block_reason="SAFETY")),
          "safety"),

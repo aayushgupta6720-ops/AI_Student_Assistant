@@ -170,3 +170,15 @@ async def test_other_visitors_are_unaffected_and_new_sessions_or_forged_headers_
     assert (await _chat("198.51.100.4", session="new-tab", headers={"X-Forwarded-For": "1.2.3.4"})).status_code == 429
     assert (await _chat("203.0.113.9")).status_code == 200
     assert agent.turns == 3
+
+
+async def test_a_message_refused_as_invalid_does_not_use_up_the_allowance(agent):
+    # The limit ran as a route dependency, before validation, so an over-long
+    # message (a 422) counted against the visitor's minute.
+    transport = httpx.ASGITransport(app=main.app, client=("10.0.0.1", 1234))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        too_long = await client.post("/chat", json={"session_id": "s", "message": "x" * 8001},
+                                     headers={"CF-Connecting-IP": "198.51.100.4"})
+    assert too_long.status_code == 422
+
+    assert [(await _chat("198.51.100.4")).status_code for _ in range(2)] == [200, 200]

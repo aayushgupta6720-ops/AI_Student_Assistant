@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 
 _SEPARATOR = "\n\n"
 _HEADING_RE = re.compile(r"(#{1,6})\s")
+_FENCE_RE = re.compile(r" {0,3}(```|~~~)")
 
 
 @dataclass
@@ -24,7 +25,7 @@ def chunk_markdown(text: str, max_chars: int = 800, overlap: int = 100) -> list[
     opens with up to `overlap` chars from the end of the one before it, cut at
     a word boundary, so text on either side of the cut keeps some context.
     Chunks starting a new section don't: the old section's tail is noise."""
-    paragraphs = _attach_headings([p.strip() for p in text.split(_SEPARATOR) if p.strip()])
+    paragraphs = _attach_headings(_blocks(text))
     chunks: list[Chunk] = []
     current: Chunk | None = None
     path: list[str] = []  # headings in effect, outermost first
@@ -62,6 +63,37 @@ def chunk_markdown(text: str, max_chars: int = 800, overlap: int = 100) -> list[
     return chunks
 
 
+def _blocks(text: str) -> list[str]:
+    """The note's blocks: runs of lines between blank lines, except that a
+    heading line is a block of its own even with no blank line before it (as
+    markdown allows after a list), and a fenced code block stays whole, so
+    its blank lines don't split it and a "# comment" in it isn't a heading.
+    Splitting on blank lines alone labelled every chunk after a commented
+    code block with that comment instead of the note's own headings."""
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    fence: str | None = None  # the marker of the code block we're in, if any
+    for line in text.split("\n"):
+        marker = _FENCE_RE.match(line)
+        if fence:
+            current.append(line)
+            if marker and marker.group(1) == fence:
+                fence = None
+        elif marker:
+            fence = marker.group(1)
+            current.append(line)
+        elif not line.strip():
+            blocks.append(current)
+            current = []
+        elif _heading_level(line):
+            blocks.extend([current, [line]])
+            current = []
+        else:
+            current.append(line)
+    blocks.append(current)
+    return [block for block in ("\n".join(lines).strip() for lines in blocks) if block]
+
+
 def _heading_level(paragraph: str) -> int:
     """1 for a paragraph opening with "# ", 2 for "## " and so on; 0 if it
     doesn't open with a heading."""
@@ -94,11 +126,13 @@ def _context(path: list[str], paragraph: str) -> list[str]:
 
 
 def _enter(path: list[str], paragraph: str) -> list[str]:
-    """The heading path after reading paragraph, which may hold several
-    headings once _attach_headings has glued them to their body."""
+    """The heading path after reading paragraph, which may open with several
+    headings once _attach_headings has glued them to their body. Only those
+    leading ones count: a "#" line further in is body text, e.g. code."""
     for part in paragraph.split(_SEPARATOR):
-        if _heading_level(part):
-            path = _context(path, part) + [part.split("\n", 1)[0]]
+        if not _heading_level(part):
+            break
+        path = _context(path, part) + [part.split("\n", 1)[0]]
     return path
 
 
