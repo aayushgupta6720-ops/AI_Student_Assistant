@@ -1,28 +1,43 @@
-# AI_Student_Assistant
+# AI Student Assistant
+
+A study-notes chatbot I built to learn how a real AI application is put together, from the chat window down to the model API.
 
 [![GitHub repo](https://img.shields.io/badge/GitHub-AI__Student__Assistant-181717?logo=github)](https://github.com/aayushgupta6720-ops/AI_Student_Assistant)
 [![Live on Render](https://img.shields.io/badge/Live-Render-46E3B7?logo=render)](https://ai-student-assistant-hz02.onrender.com)
 
 **Live demo:** https://ai-student-assistant-hz02.onrender.com
-([`/health`](https://ai-student-assistant-hz02.onrender.com/health),
-[`/docs`](https://ai-student-assistant-hz02.onrender.com/docs)) — Render's
-free tier, so the first request after a period of inactivity takes ~30–60 s
-to wake up.
+([`/health`](https://ai-student-assistant-hz02.onrender.com/health), [`/docs`](https://ai-student-assistant-hz02.onrender.com/docs)).
+It runs on Render's free tier, so the first request after a quiet period takes 30–60 seconds while the server wakes up.
 
-A small, working AI assistant built to show how the **five architectural
-layers** of an AI application fit together: **Client, Intelligence,
-Inference, Knowledge, Tools**. Each layer is its own Python package with a
-one-way dependency direction, and every request produces a trace showing
-which layers ran and for how long.
+## About
 
-Domain: a personal study-notes assistant. It searches a folder of shared
-markdown notes plus your own notes, uploaded (`.md`, `.txt` or `.pdf`) or
-saved from the chat, which are **private to your chat session**. Another
-visitor's searches never see them, and they're deleted on *New session* or
-after 24 hours.
-Stack: Python 3.12, FastAPI, Gemini (`google-genai`), SQLite + numpy, vanilla JS.
+Most AI app tutorials fit in one file: call the model, print the answer. I wanted to understand how a production AI application is organised, so I built a small but complete one around five layers: **Client, Intelligence, Inference, Knowledge and Tools**. Each layer is its own Python package, dependencies only point one way, and a test fails if a layer imports something it shouldn't.
 
-## The five layers
+The app itself is a study assistant. You can ask questions about a set of shared notes, upload your own notes (Markdown, text or PDF), save notes from the chat, and use tools such as a calculator and a web page reader. Every answer shows which layers did the work and how long each took, which kept the architecture visible while I was building it.
+
+## Features
+
+- **Streaming chat with tool calling.** The model decides when to use one of five tools (search notes, save a note, calculator, current date and time, read a web page or PDF), and answers stream in token by token over Server-Sent Events.
+- **Retrieval over your notes (RAG).** Notes are split into chunks, embedded with Gemini and searched by cosine similarity. Each answer lists the notes it used, and clicking one shows the exact passages.
+- **Private notes.** Uploads and saved notes belong to your chat session only: other visitors' searches never see them, and they're deleted with the session or after 24 hours.
+- **Visible architecture.** Under each answer is a timeline of every step and a bar showing how long each layer took.
+- **Stop button.** Stops an answer mid-stream without leaving the conversation history in a broken state.
+- **Built for a shared public demo.** Per-visitor rate limits, request size limits, safe URL fetching (no access to private networks) and sanitised Markdown rendering.
+- **Tested.** 180 offline tests using a scripted fake model, plus a small live evaluation of the model's tool choices.
+
+## Tech stack
+
+| Area | Technology |
+|---|---|
+| Backend | Python 3.12, FastAPI, Uvicorn |
+| Model | Google Gemini through `google-genai`: `gemini-3.5-flash-lite` for chat, `gemini-embedding-001` for embeddings |
+| Vector search | SQLite for storage, NumPy for cosine similarity |
+| Frontend | HTML, CSS and vanilla JavaScript over Server-Sent Events; marked and DOMPurify for Markdown |
+| Documents | pypdf |
+| Testing | pytest, pytest-asyncio |
+| Hosting | Render (free plan) |
+
+## Architecture
 
 ```
  ┌────────────────────────────────────────────────────────────────┐
@@ -52,311 +67,156 @@ Stack: Python 3.12, FastAPI, Gemini (`google-genai`), SQLite + numpy, vanilla JS
 
 | Layer | Job | Talks to | Never touches |
 |---|---|---|---|
-| **Client** | UI; send a message, render events | HTTP/SSE only | models, vectors, tools |
+| **Client** | The UI: send a message, render the events | HTTP/SSE only | models, vectors, tools |
 | **Intelligence** | Decide what the model sees and when tools run | inference, knowledge, tools | vendor SDKs |
-| **Inference** | Call the model; translate neutral types ⇄ vendor format; embeddings | `google.genai` | the other layers |
-| **Knowledge** | Chunk, embed, store, retrieve notes | inference (for embeddings) | intelligence, tools |
-| **Tools** | Registry of callable functions with JSON schemas | knowledge (for `search_notes`) | intelligence |
+| **Inference** | Call the model and translate to and from its format; embeddings | `google.genai` | the other layers |
+| **Knowledge** | Chunk, embed, store and retrieve notes | inference (for embeddings) | intelligence, tools |
+| **Tools** | A registry of functions the model can call | knowledge (for `search_notes`) | intelligence |
 
-**The dependency rule** is enforced by `tests/test_layering.py`: only
-`app/inference/` may import `google.genai`, and lower layers never import
-upward. `app/main.py` is the composition root — the one file that sees all
-five layers and wires them together.
+The dependency rule is enforced by `tests/test_layering.py`: only `app/inference/` may import the Gemini SDK, and lower layers never import upward. `app/main.py` is the one file that sees all five layers and wires them together.
 
-## One request, layer by layer
+### One request, step by step
 
-Ask *"What's on my reading list?"* and this happens:
+When you ask *"What's on my reading list?"*:
 
-1. **Client** posts `{session_id, message}` to `/chat` and starts reading the SSE stream.
-2. **Intelligence** (`agent.run_turn`) appends the user message to session memory and calls `provider.stream_generate(system, history, registry.specs())`.
-3. **Inference** (`GeminiProvider`) converts neutral `Message`s to Gemini `Content`s, streams the response, and yields `ToolCall(search_notes, {"query": "reading list"})`.
-4. **Intelligence** emits a `tool_call` event to the client and calls `registry.execute(...)`.
-5. **Tools** (`search_notes`) → **Knowledge** (`retrieve`) → **Inference** (`embed(query)`) → SQLite/numpy cosine top-k → chunks come back with `doc_id`s and scores.
-6. **Intelligence** appends a `ToolResultPart`, loops, and the model now streams the answer as `token` events.
-7. The `done` event carries sources, iterations, tokens, and a per-layer latency breakdown; the **Client** draws the timeline and the layer bar.
+1. The **client** sends the message to `POST /chat` and starts reading the event stream.
+2. The **intelligence** layer (`agent.py`) adds it to the session's history and asks the model for a response, offering it the tool definitions.
+3. The **inference** layer (`gemini.py`) translates the conversation into Gemini's format and streams back a tool call: `search_notes("reading list")`.
+4. The agent runs the tool. `search_notes` asks the **knowledge** layer, which embeds the query and finds the closest chunks in the vector store.
+5. The results go back to the model, which streams its answer. The final `done` event carries the sources, token counts and per-layer timings, which the client draws under the answer.
 
-The server logs the same thing as one JSON line per call:
+The server logs the same trace as one JSON line per chat (see [request flow and tracing](docs/ENGINEERING_NOTES.md#request-flow-and-tracing)).
 
-```json
-{"event": "chat_call", "query": "<26 chars>", "iterations": 2,
- "tools_used": ["search_notes"], "sources": ["reading-list"], "finish_reason": "stop",
- "per_layer_ms": {"inference": 3737.56, "knowledge": 0.75, "tools": 528.86, "intelligence": 0.15},
- "steps": [{"layer": "inference", "name": "generate", "latency_ms": 2108.7, "self_ms": 2108.7, "depth": 0, ...},
-           {"layer": "tools", "name": "search_notes", "meta": {"args": {"query": "<12 chars>"}}, ..., "depth": 1}, ...]}
-```
+### Extending it
 
-`latency_ms` is inclusive, `self_ms` is exclusive of nested steps, so the
-per-layer totals don't double count (`tools.search_notes` wraps
-`inference.embed_query`). What visitors type, and the text of tool
-arguments, is logged as its length: it can hold a private note ("Save a note
-titled…"), and the log would keep it long after the note's 24 hours. A
-private note's name is its title or file name, so it's logged as
-`<private>` among the sources and as a length on upload. Set
-`LOG_CHAT_TEXT=true` to log the text itself while debugging.
+Because each layer only depends on the interface below it, changing one stays local:
 
-A turn that ends early says why under the answer: cut off at the model's
-length limit, blocked by a safety filter, and so on (`finish_reason`, in
-provider-neutral terms), instead of stopping mid-sentence or showing nothing.
+- **Another model provider:** add a module to `app/inference/` implementing `LLMProvider` (`stream_generate` and `embed`) and return it from `get_provider()`.
+- **A real vector database:** replace `app/knowledge/store.py` with a pgvector or Qdrant client that has the same methods.
+- **A new tool:** register a `Tool(name, description, json_schema, handler)` in `app/tools/builtin.py`, and the model can use it on the next request.
+- **A different client:** anything that can POST JSON and read Server-Sent Events works, such as a CLI or a Slack bot.
+- **Persistent chat memory:** replace `SessionStore` with a Redis- or Postgres-backed class that stores the same `Message` list.
 
-**Stop** (the button that replaces Send while an answer streams, or Esc)
-aborts the request. The server sees the connection close, cancels the turn
-and logs `chat_stopped`, and the agent leaves memory as the user saw it: the
-question and whatever answer text had arrived. A tool call whose result never
-came is dropped, and so is a question with no answer yet, or the next message
-would get an answer to both. The same tidy-up runs when a tab closes
-mid-answer or the model fails partway, and New session stops a streaming
-answer before clearing the chat.
+## Getting started
 
-## Run it
+### Prerequisites
+
+- Python 3.12
+- A Gemini API key from [Google AI Studio](https://aistudio.google.com/) (the free tier is enough)
+
+### Setup
 
 ```bash
+git clone https://github.com/aayushgupta6720-ops/AI_Student_Assistant.git
+cd AI_Student_Assistant
 python3.12 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # put your GEMINI_API_KEY in .env
-python -m scripts.ingest    # sync data/notes/*.md into data/knowledge.sqlite (unchanged notes skipped, deleted ones dropped)
+cp .env.example .env        # then put your GEMINI_API_KEY in .env
 uvicorn app.main:app --reload
 ```
 
-Open <http://localhost:8000>. Try the suggestions in the sidebar:
+On startup the app indexes the sample notes in `data/notes` (`python -m scripts.ingest` does the same from the command line). Open http://localhost:8000 and try the suggestions in the sidebar:
 
-- *What's on my reading list?* → `search_notes`, answer cites `reading-list`
-- *How is this assistant built?* → the notes include a description of this very architecture
-- *What is 17% of 2,340?* → `calculator`, no knowledge lookup
-- *Save a note titled Groceries: milk, eggs, coffee* → `save_note` stores it as a private note for this chat
-- *What did I just save?* → session memory + `search_notes` finds the new note
-- *Hi* → no tools at all
+- *What's on my reading list?* searches the notes and cites `reading-list`
+- *How is this assistant built?* answers from a note that describes this architecture
+- *What is 17% of 2,340?* uses the calculator
+- *Save a note titled Groceries: milk, eggs, coffee*, then *What did I just save?*
+- *Hi* uses no tools at all
 
-Raw SSE, if you want to see the wire format:
+### Configuration
+
+Settings are read from `.env`; `app/config.py` lists all of them. The main ones:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY` | none | Required |
+| `GENERATION_MODEL` | `gemini-3.5-flash-lite` | The chat model ([why this one](docs/ENGINEERING_NOTES.md#model-choice-and-free-tier-quotas)) |
+| `CLIENT_IP_HEADER` | unset | The header holding the visitor's IP behind a proxy (`CF-Connecting-IP` on Render) |
+| `LOG_CHAT_TEXT` | `false` | Log what visitors type, not just its length |
+| `CHAT_LIMIT_PER_MINUTE`, `CHAT_LIMIT_PER_DAY` and others | 6, 30, … | Per-visitor limits ([all of them](docs/ENGINEERING_NOTES.md#rate-limits-and-request-size)) |
+
+## API
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/chat` | Send `{session_id, message, timezone?}` and get a Server-Sent Events stream back (`status`, `tool_call`, `tool_result`, `token`, `done`, `error`). `timezone` is an IANA name such as `Asia/Kolkata`, for the date tool (the web page sends the browser's); without it, the server's zone is used, which is UTC on Render. |
+| `GET` | `/notes?session_id=…` | The shared notes plus that session's private notes |
+| `POST` | `/notes/upload` | Upload a `.md`, `.txt` or `.pdf` note (multipart `session_id` and `file`, up to 2 MB) |
+| `DELETE` | `/notes/{doc_id}?session_id=…` | Delete one of the session's private notes |
+| `POST` | `/ingest` | Re-index `data/notes`; only new or changed notes are embedded |
+| `POST` | `/reset/{session_id}` | Clear the conversation and the session's private notes (`?keep_uploads=true` keeps the notes) |
+| `GET` | `/health` | Status, model, number of indexed chunks and tool names |
+| `GET` | `/docs` | Interactive API documentation from FastAPI |
+
+To see the raw event stream:
 
 ```bash
 curl -N -X POST localhost:8000/chat -H 'Content-Type: application/json' \
   -d '{"session_id":"cli","message":"What is on my reading list?"}'
 ```
 
-`/chat` also takes an optional `timezone` (an IANA name like `Asia/Kolkata`)
-for `current_datetime` to answer in; the web client sends the browser's.
-Without one it uses the server's zone, which on Render is UTC.
-
-Other endpoints: `GET /health`, `GET /notes?session_id=…` (shared notes plus
-that session's private notes), `POST /notes/upload` (multipart `session_id` +
-`file`; up to 2 MB and 200,000 characters of text), `DELETE /notes/{doc_id}?session_id=…`,
-`POST /ingest` (embeds only new and changed notes: a note whose stored chunks
-match its text and the current embedding model is skipped, so the button costs
-no quota when nothing changed), `POST /reset/{session_id}` (also deletes the session's private
-notes unless `?keep_uploads=true`), `GET /docs`. A session can have 10 private
-notes at a time, uploads and saved notes together. The whole app keeps at most
-10,000 private chunks (`MAX_PRIVATE_CHUNKS`), since search holds them all in
-memory: that took the process from 86 MB to a 205 MB peak, on a free
-instance with 512 MB. Past it, uploads get a 503 until older notes expire.
-A private note's id is its file name or title in any script (`биология`,
-`生物`), and never a shared note's: "Reading List.md" becomes `reading-list-2`,
-or searches and source chips would mix the two up. Text files saved on
-Windows (CRLF line endings, a byte-order mark) are read like any other.
-
-PDFs, uploaded or linked, are the one input where a few KB can cost a lot:
-pypdf holds ~55 bytes per byte of a page's drawing instructions and parses
-them at ~2 MB/s in pure Python, and by default expands a compressed stream to
-75 MB. A 13 KB PDF took the process from 66 MB to a 496 MB peak. So no
-stream expands past 2 MB, pages with over 512 KB of instructions (drawings; a
-page of text is tens of KB) are skipped, and a PDF gets at most 4 MB of
-instructions parsed; that one is now refused in under 0.1 s.
-
-A search returns up to 4 passages (`search_notes` takes 1 to 10), minus any
-scoring more than 0.1 below the best match (`RETRIEVAL_SCORE_MARGIN`), so
-the answer's "retrieved" chips name the note it came from rather than every
-note in the top 4. The cutoff is relative because a terse query's right
-answer can score as low as an unrelated note does for another query. Click a
-chip to see the passages the search returned from that note, the text the
-answer was based on; the `done` event carries them as `passages` (never
-logged: they're the notes' own text).
-
-How private notes stay private: every stored chunk has an owner, either `""`
-for the shared notes or the session id that uploaded or saved it. `search()`
-masks out other owners' rows, and the agent sets a `current_session` context
-variable each turn, so `search_notes` and `save_note` are scoped without
-passing a session id through every tool. `save_note` never writes to
-`data/notes/`: that folder is the same for every visitor.
-
-What the tools refuse: `fetch_url` only fetches public http(s) addresses (not
-localhost, private networks or cloud metadata endpoints), checks every
-redirect, reads at most 2 MB, and gives up after 20 s. It resolves the host
-once, checks every address, and connects to the one it checked (sending the
-real name in `Host` and for TLS), so a DNS server that answers "public" to the
-check and "private" to a second lookup gets nowhere: before, the GET reached
-the private address before the response was refused. It reads PDF links too
-(up to 10 MB, since a PDF can't be read from a prefix), recognised by their
-first bytes rather than their headers or address, with the same pypdf
-extraction and limits as uploads, stopping once it has enough text; other
-files (images, zips) are refused rather than decoded as garbage text. `calculator` refuses
-results over about 1,200 digits, since it runs on the event loop and a
-`9**9**9` would stall every chat, and results JSON can't carry (`inf`, `nan`,
-or a complex number from `(-8)**(1/3)`). The registry turns any tool result
-like that into an error: results stay in the chat's history and go back to
-the model on every later turn, so one that can't be sent broke the chat for
-good. A turn's last model call (the 6th) is offered no tools, so it ends
-with an answer rather than tool results nobody reads. Answers are rendered as markdown through
-DOMPurify with only markdown's own tags allowed, so HTML that the model
-repeats from a web page or note can't run script or load images. DOMPurify
-and marked load from cdnjs pinned by integrity hash, so a tampered copy
-doesn't run (answers then show as plain text), and links in answers open in
-a new tab, since leaving the page and coming back clears the chat.
-
-### Per-visitor rate limits
-
-The free-tier quota is shared by everyone using the app, so each visitor
-(an IP address; for IPv6, its /64) gets its own allowance: 6 chat messages a
-minute and 30 a day, 10 uploads an hour and 3 re-ingests an hour. Uploads
-also count their chunks, 1,000 a day: a file can be ~500 chunks to embed and
-keep in memory, and new sessions don't reset it. Notes saved from chat count
-against the same budget (and hold at most 200,000 characters), or chat alone
-could fill the server-wide cap. A chat message is counted once it's valid, so
-an over-long one (the page checks the 8,000-character limit before sending)
-doesn't use up the minute's allowance. Over a limit, the endpoint
-returns a 429 with a `Retry-After` header, and the chat says how long to
-wait. The model isn't called for a refused request, and an upload over its
-chunk budget is refused before anything is embedded. Change the numbers
-with `CHAT_LIMIT_PER_MINUTE`, `CHAT_LIMIT_PER_DAY`, `UPLOAD_LIMIT_PER_HOUR`,
-`UPLOAD_CHUNK_LIMIT_PER_DAY` and `INGEST_LIMIT_PER_HOUR`; 0 turns one off. Counts
-are in memory, which suits the single instance of Render's free plan, and
-reset on restart. Visitors sharing an IP, like a classroom behind one
-router, share one allowance. Request bodies over 128 KB (2.1 MB for
-`/notes/upload`) are refused with a 413 before they're read: FastAPI
-otherwise reads and parses all of a body before checking `max_length`, and
-a 52 MB message cost ~250 MB of memory on its way to a 422.
-
-Behind a proxy, the connecting address is the proxy's, so `CLIENT_IP_HEADER`
-names the header that carries the visitor's IP. Only use a header that the
-proxy *overwrites* when a client sends it. On Render that's
-`CF-Connecting-IP`: Cloudflare, in front of Render, sets it and refuses
-requests that bring their own (a 403, "error code: 1000"). Not
-`X-Forwarded-For`: Render appends to it, and it sets `FORWARDED_ALLOW_IPS=*`
-for Python services, so uvicorn takes that header's first entry, which the
-visitor chose, as the connecting address. If the configured header is
-missing from a request, everyone without it shares one allowance.
-
-`render.yaml` sets `CLIENT_IP_HEADER`, but only services created from the
-Blueprint pick up `render.yaml`. The live demo was created in the dashboard,
-so its `CLIENT_IP_HEADER=CF-Connecting-IP` is set there; do the same for any
-service you create by hand.
-
-### Model choice and free-tier quotas
-
-Default is `gemini-3.5-flash-lite` (set `GENERATION_MODEL` in `.env`), which
-the free tier allows 500 requests/day. Free-tier quotas are per model *and*
-per Google project, so give this app a key from its own project if anything
-else (an eval run, another demo) uses the same key. The bigger
-`gemini-3.5-flash` and `gemini-3.6-flash` work, but the free tier allows only
-**20 requests per day** on each, which an agent loop (2–3 model calls per
-turn) burns in a few turns. Daily-quota exhaustion comes back as a 429 with a long
-`retryDelay`; the provider gives up instead of sleeping when that delay
-exceeds `rate_limit_max_wait_s`, and the chat shows when the quota resets.
-Gemini also has capacity spikes (503 UNAVAILABLE, "high demand"): those are
-retried after 1s, 2s and 4s, then the chat says the model is overloaded and
-to try again in a minute, rather than showing the raw error. A call that
-sends nothing for `GEMINI_TIMEOUT_S` (60s), at the start or partway through a
-streamed answer, is stopped and the chat says so, instead of hanging.
-
-## Deploy to Render
-
-`render.yaml` defines the service as a Render Blueprint (native Python
-runtime, free plan, `/health` as the health check). In the Render dashboard
-choose **New → Blueprint**, pick this repo, and paste your `GEMINI_API_KEY`
-when prompted (it's marked `sync: false` so it never lives in the repo).
-Pick the repo through your connected GitHub account rather than pasting its
-public URL: Render only deploys on push for a repo connected through the
-account, and a public-URL service has to be deployed by hand.
-
-Render's filesystem is ephemeral, so the index is empty after every deploy;
-the app syncs it with `data/notes/*.md` on every startup, which elsewhere
-costs nothing for unchanged notes and re-embeds everything after an
-embedding-model change (private notes from another model are dropped: their
-vectors can't be searched with the new ones). If that fails (a Gemini quota
-429, a bad key), the app still boots and logs `startup_ingest_failed`; chat
-works but `search_notes` finds nothing new until `POST /ingest` succeeds. Private
-notes (uploads and `save_note`) live in the same index, so a deploy or
-restart also clears them. The free plan sleeps after inactivity, so the
-first request after a while takes ~30–60 s.
-
-To check the rate limit identifies visitors correctly after a deploy, send
-11 uploads that fail validation (so no quota is spent), each with a made-up
-`X-Forwarded-For` (not `CF-Connecting-IP`, which Cloudflare refuses with a 403
-before it reaches the app):
-
-```bash
-for i in $(seq 11); do curl -s -o /dev/null -w '%{http_code} ' \
-  -H "X-Forwarded-For: 10.9.9.$i" \
-  -F session_id=check-$i -F 'file=@/dev/null;filename=x.exe' \
-  https://ai-student-assistant-hz02.onrender.com/notes/upload; done
-```
-
-Ten `400`s then a `429` means the made-up headers didn't count as new
-visitors. It uses up your own upload allowance for an hour. Run it against the deployed app, not localhost: uvicorn trusts
-`X-Forwarded-For` on connections from `127.0.0.1` by default
-(`--forwarded-allow-ips`), so requests from your own machine can pick their
-address and you'll see eleven `400`s. Then check the Render logs for
-`client_ip_header_missing`: if it appears, the header isn't reaching the app
-and all visitors share one allowance, so `CLIENT_IP_HEADER` needs changing.
-
-## Tests
+## Testing
 
 ```bash
 pytest
 ```
 
-Everything runs offline against `tests/fake_provider.py`, a scripted
-`LLMProvider`: the layering rule, chunking, the vector store, the tool
-registry, and the agent loop (tool call → result fed back → final answer,
-memory persistence, max-iteration guard). `fetch_url` is tested against
-local HTTP servers: private addresses, redirects, huge and slow pages.
+The 180 tests run offline in about two seconds. Instead of calling Gemini they use `tests/fake_provider.py`, a scripted model that returns tool calls and text on cue. That makes the agent loop, tools, retrieval, uploads, rate limits and API testable end to end without network access. `fetch_url` is tested against local HTTP servers.
 
-Which tool the model picks can only be checked against the model itself:
+Whether the model picks the right tool can only be checked against the real model, so there's also a small evaluation that asks nine typical questions and checks which tools each one used:
 
 ```bash
-python -m scripts.eval_routing              # ~20 Gemini requests
-python -m scripts.eval_routing --repeat 3 --only "assistant built"
+python -m scripts.eval_routing    # uses about 20 Gemini requests
 ```
 
-It asks nine typical questions (the page's suggestions, plus ones that are
-easy to route wrong) in fresh chats and checks the tools each used. The
-`assistant_v1` prompt answered "How is this assistant built?" from general
-knowledge instead of searching the notes that document it (0/1 in the eval,
-and seen in production); `assistant_v2` searched in 2/2 runs, with every other
-question still routed correctly.
+## Deployment
 
-## How to swap a layer
+The live demo runs on Render's free plan, and `render.yaml` defines it as a Blueprint. In the Render dashboard, choose **New → Blueprint**, select this repository through your connected GitHub account, and enter your `GEMINI_API_KEY` when prompted. Render wipes the disk on every deploy, so the app rebuilds the index on startup. The [engineering notes](docs/ENGINEERING_NOTES.md#deploying-to-render) cover the rest, including the proxy header the rate limits depend on.
 
-Because each layer only depends on the contract below it, swapping one is local:
+## Engineering challenges
 
-- **Different model provider** → write `app/inference/claude.py` implementing
-  `LLMProvider` (two methods: `stream_generate`, `embed`) and return it from
-  `get_provider()`. Nothing else changes. Provider-specific state the model
-  needs echoed back (Gemini's `thought_signature`) rides along in
-  `provider_state` on parts, opaque to every other layer.
-- **Real vector database** → replace `app/knowledge/store.py` with a
-  Qdrant/pgvector client exposing the same methods (upsert, search, list,
-  delete and purge by owner, and the `embedded_with` check re-ingesting uses).
-- **New tool** → add a `Tool(name, description, json_schema, handler)` in
-  `app/tools/builtin.py`. The model sees it on the next request.
-- **Different client** → anything that can POST JSON and read SSE (a CLI,
-  Slack bot, mobile app) is a client. The server doesn't care.
-- **Persistent memory** → replace `SessionStore` with a Redis/Postgres-backed
-  class that stores the same neutral `Message` list.
+Running a public demo on free tiers turned up problems I wouldn't have met in a tutorial. The highlights are below; [docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md) has the details and the measurements.
 
-## Layout
+- **Sharing one free quota fairly.** Every visitor draws on the same 500 Gemini requests a day, so each IP address gets its own allowance. Behind Render's proxy, the usual `X-Forwarded-For` header can be forged by the visitor, so the app identifies visitors by `CF-Connecting-IP`, which Cloudflare sets itself. ([more](docs/ENGINEERING_NOTES.md#rate-limits-and-request-size))
+- **A 13 KB PDF that could crash the server.** A PDF full of compressed drawing instructions pushed memory from 66 MB to 496 MB, close to the instance's 512 MB. I added limits on how far the PDF library expands and parses a file, and the same PDF is now refused in under 0.1 seconds. ([more](docs/ENGINEERING_NOTES.md#pdf-limits))
+- **Letting the model fetch URLs safely.** `fetch_url` must not reach the server's private network or cloud metadata endpoints. It checks every redirect and connects only to the exact address it checked, which also defeats DNS rebinding. ([more](docs/ENGINEERING_NOTES.md#tool-safety))
+- **Keeping the conversation history valid.** A calculator result like `(-8)**(1/3)` is a complex number, which can't be sent back to the model as JSON, and once it was in the history every later message failed. Tool results are now checked before they're stored, and stopped or failed turns are tidied out of the history. ([more](docs/ENGINEERING_NOTES.md#the-agent-loop))
+- **Showing only relevant sources.** Search always returned the top four passages, so answers cited unrelated notes. Measuring the similarity scores showed a clear gap between relevant and unrelated passages, so results well below the best match are now dropped. ([more](docs/ENGINEERING_NOTES.md#retrieval))
+- **Catching a prompt regression.** In production, the model answered "How is this assistant built?" from general knowledge instead of the notes. A small evaluation reproduced it, and adding one rule to the system prompt fixed it without breaking the other questions. ([more](docs/ENGINEERING_NOTES.md#evaluating-tool-routing))
+
+## What I learned
+
+- **Interfaces matter more than frameworks.** Keeping the model behind a small interface (`stream_generate` and `embed`) meant the agent, the tools and the tests never needed to know it was Gemini.
+- **Constraints shape the design.** A 500-requests-a-day quota and 512 MB of memory decided more of the architecture than any feature did: rate limits, upload caps, memory limits and retry logic all came from them.
+- **Measure before fixing.** Measuring changed several of my fixes. An absolute relevance cutoff looked obvious until the scores showed it would drop correct answers, and some history problems I expected to break Gemini turned out to be harmless once I tested them.
+- **LLM applications fail in unusual ways.** Blocked answers with no content, tool results that can't be serialised, and half-finished turns left in the history all needed handling that an ordinary web app doesn't.
+- **A fake model makes an AI app testable.** Scripting the model's responses let me test the agent loop deterministically and offline.
+- **Prompts need tests too.** A prompt change can fix one question and quietly break another, and a small evaluation makes that visible.
+
+## Future work
+
+- Persistent storage (Postgres with pgvector, and Redis for sessions) so notes and conversations survive deploys and restarts
+- User accounts instead of anonymous session ids
+- Rate-limit counters shared between instances, so the app can run on more than one server
+- OCR for scanned PDFs, which currently have no text to index
+- Continuous integration that runs the test suite on every push
+- A Dockerfile, so it runs the same way anywhere
+
+## Project structure
 
 ```
 app/
-  main.py                composition root
+  main.py                composition root: builds and wires the five layers
   config.py              settings from .env
   observability.py       time_step(layer, name) tracing shared by all layers
-  api/                   routes.py (HTTP edge: AgentEvents → SSE), ratelimit.py, body_limit.py
+  api/                   routes.py (HTTP and SSE), ratelimit.py, body_limit.py
   intelligence/          agent.py, memory.py, prompts.py
   inference/             types.py, provider.py, gemini.py
   knowledge/             chunking.py, store.py, ingest.py, retrieval.py, uploads.py
   tools/                 registry.py, builtin.py
 client/                  index.html, app.js, style.css
-data/notes/*.md          the knowledge base (5 sample notes)
-data/knowledge.sqlite    built by scripts/ingest.py
-scripts/                ingest.py (sync data/notes), eval_routing.py (live tool-routing check)
-tests/
+data/notes/*.md          the shared sample notes
+docs/                    ENGINEERING_NOTES.md: design details, limits and measurements
+scripts/                 ingest.py (index data/notes), eval_routing.py (live tool-routing check)
+tests/                   pytest suite, with a scripted fake model
 ```
