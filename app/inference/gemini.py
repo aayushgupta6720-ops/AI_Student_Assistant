@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 from google import genai
 from google.genai import types
-from google.genai.errors import ClientError, ServerError
+from google.genai.errors import APIError, ClientError, ServerError
 
 from app.config import get_settings
 from app.inference.provider import EmbedKind, ModelOverloadedError, ModelTimeoutError, QuotaExceededError
@@ -34,6 +34,7 @@ from app.inference.types import (
     ToolSpec,
     Usage,
 )
+from app.observability import log_event
 
 _MAX_RATE_LIMIT_RETRIES = 5
 # A 503 "high demand" usually clears within seconds to minutes: retry a few
@@ -83,17 +84,38 @@ def _rate_limit_retry_delay(exc: ClientError, fallback: float) -> float:
     return fallback
 
 
+def _quota_ids(exc: APIError) -> list[str]:
+    """The quotas a 429 says were exceeded, e.g.
+    "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"."""
+    details = (exc.details or {}).get("error", {}).get("details", [])
+    return [
+        violation.get("quotaId", "")
+        for detail in details
+        if detail.get("@type", "").endswith("QuotaFailure")
+        for violation in detail.get("violations", [])
+    ]
+
+
 def _is_daily_quota(exc: ClientError) -> bool:
     """True for a 429 caused by a per-day quota (e.g. the free tier's
     requests-per-day cap). Its RetryInfo still suggests ~60s, but no retry can
     succeed until the quota resets."""
-    details = (exc.details or {}).get("error", {}).get("details", [])
-    return any(
-        "PerDay" in violation.get("quotaId", "")
-        for detail in details
-        if detail.get("@type", "").endswith("QuotaFailure")
-        for violation in detail.get("violations", [])
+    return any("PerDay" in quota for quota in _quota_ids(exc))
+
+
+async def _wait_to_retry(delay: float, exc: APIError, attempt: int, call: str, model: str) -> None:
+    """Log a retry, then wait it out. The wait falls inside the caller's timed
+    step, so without the log a turn slowed by retries looks like a slow model."""
+    log_event(
+        event="gemini_retry",
+        call=call,
+        model=model,
+        status=exc.code,
+        attempt=attempt,
+        wait_s=delay,
+        quotas=_quota_ids(exc),
     )
+    await asyncio.sleep(delay)
 
 
 def _next_pacific_midnight() -> datetime | None:
@@ -226,9 +248,9 @@ class GeminiProvider:
                 yield StreamEnd(finish_reason="stop")
                 return
             except ClientError as exc:
-                await asyncio.sleep(_rate_limit_backoff(exc, attempt))
+                await _wait_to_retry(_rate_limit_backoff(exc, attempt), exc, attempt, "generate", self.model)
             except ServerError as exc:
-                await asyncio.sleep(_overload_backoff(exc, attempt))
+                await _wait_to_retry(_overload_backoff(exc, attempt), exc, attempt, "generate", self.model)
             except httpx.TimeoutException as exc:
                 raise _timeout_error() from exc
 
@@ -300,9 +322,9 @@ class GeminiProvider:
                 )
                 return [e.values for e in response.embeddings]
             except ClientError as exc:
-                await asyncio.sleep(_rate_limit_backoff(exc, attempt))
+                await _wait_to_retry(_rate_limit_backoff(exc, attempt), exc, attempt, "embed", self.embedding_model)
             except ServerError as exc:
-                await asyncio.sleep(_overload_backoff(exc, attempt))
+                await _wait_to_retry(_overload_backoff(exc, attempt), exc, attempt, "embed", self.embedding_model)
             except httpx.TimeoutException as exc:
                 raise _timeout_error() from exc
         raise AssertionError("unreachable")

@@ -37,6 +37,15 @@ Every layer wraps its work in `time_step(layer, name)` (`app/observability.py`).
 
 `latency_ms` is inclusive and `self_ms` excludes nested steps, so the per-layer totals don't double-count (`tools.search_notes` wraps `inference.embed_query`).
 
+A `generate` or `embed_query` step includes any time spent waiting to retry a 429 or 503, so each retry is logged on its own line, just before that turn's `chat_call`:
+
+```json
+{"event": "gemini_retry", "call": "generate", "model": "gemini-3.5-flash-lite", "status": 429,
+ "attempt": 1, "wait_s": 18.0, "quotas": ["GenerateRequestsPerMinutePerProjectPerModel-FreeTier"]}
+```
+
+A slow step with no `gemini_retry` before it was Gemini itself being slow. Before this was logged, three slow turns (10.9 s, 25.8 s and 35.6 s, in September and October 2026) each had a `generate` step of 9–26 s where about 1 s is normal, and their logs couldn't say why.
+
 What visitors type, and the text of tool arguments, is logged as its length. It can contain a private note ("Save a note titled…"), and the log would keep it long after the note's 24 hours. A private note's name is its title or file name, so it appears as `<private>` among the sources and as a length on upload. Search passages are never logged. Set `LOG_CHAT_TEXT=true` to log the text itself while debugging.
 
 ## The agent loop

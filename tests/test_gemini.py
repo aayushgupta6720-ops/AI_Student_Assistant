@@ -270,3 +270,53 @@ def test_client_is_built_with_the_configured_timeout(monkeypatch):
         assert gemini._client()._api_client._http_options.timeout == 12_500  # milliseconds
     finally:
         gemini._client.cache_clear()
+
+
+PER_MINUTE = "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+
+
+@pytest.fixture
+def logged(monkeypatch):
+    events = []
+    monkeypatch.setattr(gemini, "log_event", lambda **fields: events.append(fields))
+    return events
+
+
+async def test_chat_retry_is_logged_with_the_status_wait_and_quota(monkeypatch, logged):
+    # The wait falls inside the turn's "generate" step: this log is the only
+    # way to tell a retried call from a slow one.
+    outcomes = [_rate_limited("0.01s", quota_id=PER_MINUTE)]
+
+    def make_stream():
+        if outcomes:
+            raise outcomes.pop(0)
+        return _Stream([_finished("STOP")])
+
+    _install_stream(monkeypatch, make_stream)
+
+    events = await _stream_events()
+
+    assert events[-1] == StreamEnd(finish_reason="stop")
+    assert logged == [{
+        "event": "gemini_retry", "call": "generate", "model": gemini.GeminiProvider().model,
+        "status": 429, "attempt": 1, "wait_s": 0.01, "quotas": [PER_MINUTE],
+    }]
+
+
+async def test_embed_overload_retries_are_logged(embed_calls, no_backoff, logged):
+    embed_calls([_overloaded(), _overloaded()])
+
+    await gemini.GeminiProvider().embed(["a"], "query")
+
+    assert [(e["call"], e["status"], e["attempt"], e["quotas"]) for e in logged] == [
+        ("embed", 503, 1, []),
+        ("embed", 503, 2, []),
+    ]
+
+
+async def test_an_error_that_is_not_retried_logs_no_retry(embed_calls, logged):
+    embed_calls([_rate_limited("0.01s", quota_id=DAILY)])
+
+    with pytest.raises(QuotaExceededError):
+        await gemini.GeminiProvider().embed(["a"], "query")
+    assert logged == []
