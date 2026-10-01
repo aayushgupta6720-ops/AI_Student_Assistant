@@ -18,6 +18,8 @@ Scores, per case:
            the expected note, and how many of the facts its passages hold:
            what a single search can give the model to work with
   sourced  whether the turn's searches returned the expected note at all
+  searches how many times the model called search_notes (0 means it
+           answered from its own knowledge, not the notes)
 """
 
 import argparse
@@ -67,6 +69,7 @@ class Result:
     case: Case
     answer: str = ""
     sources: tuple[str, ...] = ()
+    tools: tuple[str, ...] = ()  # every tool call the turn made
     answer_hits: tuple[bool, ...] = ()
     search_hit: bool | None = None  # None for not_in_notes: there's no right note
     context_hits: tuple[bool, ...] = ()
@@ -111,6 +114,7 @@ async def _run_case(agent: Agent, provider: LLMProvider, store: VectorStore, ses
     [done] = [e async for e in agent.run_turn(session, case.question) if isinstance(e, AgentDone)]
     result.answer = done.answer
     result.sources = tuple(done.sources)
+    result.tools = tuple(done.tools_used)
     result.answer_hits = hits(case.facts, done.answer)
     return result
 
@@ -164,6 +168,7 @@ def case_report(r: Result) -> str:
         search = "hit" if r.search_hit else "miss"
         line += (f" facts {_ratio(r.answer_hits):<5} search {search}, {_ratio(r.context_hits)} facts"
                  f"  sourced {'yes' if r.sourced else 'no'}")
+    line += f"  searches {r.tools.count('search_notes')}"
     lines = [line]
     if not r.passed:
         missing = [f for f, ok in zip(c.facts, r.answer_hits) if not ok]

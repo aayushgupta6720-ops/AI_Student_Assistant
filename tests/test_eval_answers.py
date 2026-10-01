@@ -60,6 +60,7 @@ async def test_a_run_scores_answers_and_refusals_offline():
     assert [(r.passed, r.error) for r in results] == [(True, None), (True, None)]
     assert isinstance(results[0].search_hit, bool) and results[1].search_hit is None
     assert results[0].answer_hits == (True,)
+    assert results[0].tools == ("search_notes",)
     assert "PASS" in case_report(results[0])
     assert re.search(r"^all\s+2/2", summary(results), re.MULTILINE)
 

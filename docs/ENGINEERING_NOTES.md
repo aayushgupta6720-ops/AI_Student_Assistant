@@ -183,3 +183,17 @@ python -m scripts.eval_answers --only whole_doc   # a category, or case ids
 ```
 
 A run spends far more than the routing eval, so it uses `EVAL_GEMINI_API_KEY`, a key from a different Google project, and refuses to fall back to the live demo's key unless given `--allow-demo-key`. The offline tests check that every fact really is in the note its case names, so a failing case means the assistant missed it, not that the case can't be passed.
+
+**Baseline** (2026-10-02, prompt `assistant_v2`, `gemini-3.5-flash-lite`). Two runs passed and failed the same cases; where the numbers differ, both are given:
+
+| Category | Passed | Facts in answers | One search returns the note | Facts one search holds |
+|---|---|---|---|---|
+| `single_fact` | 6/6 | 100% | 6/6 | 100% |
+| `exact_term` | 6/7 | 85% | 6/7 | 85% |
+| `whole_doc` | 0/4 | 38%, 51% | 4/4 | 67% |
+| `not_in_notes` | 3/3 | - | - | - |
+| All | 15/20 | 58%, 66% | 16/17 | 76% |
+
+- **Whole-document questions fail every time.** Asked to list every term the biology note defines, the model searched 2 to 5 times and listed 4 or 7 of the 12. On the formula sheet it searched once and named 4 of 9 laws. A search returns at most four passages, and the model stops after a few searches.
+- **"What's happening in MPSH 2A?" fails every time.** No search for the venue code returns the handbook passage that names it, so the model says, correctly given what it found, that the notes don't mention it. The other exact-term questions passed.
+- **Textbook questions need "my notes".** In the first run, "What's the net ATP yield of glycolysis?" and three similar questions passed without any search: the model answered from its own knowledge, so they tested nothing. They now ask about "my notes", and every case's line shows its search count.
