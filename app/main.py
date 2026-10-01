@@ -31,7 +31,8 @@ async def lifespan(app: FastAPI):
     provider = get_provider()
     store = get_store()
     registry = build_registry(provider, store)
-    memory = SessionStore(settings.memory_window_messages, settings.max_sessions)
+    # Chat history quotes private notes, so it expires with them.
+    memory = SessionStore(settings.memory_window_messages, settings.max_sessions, max_age_s=UPLOAD_TTL_S)
 
     store.purge_uploads(UPLOAD_TTL_S)
     stale = store.purge_stale_private(embedded_with())

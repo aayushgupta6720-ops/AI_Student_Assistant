@@ -128,6 +128,55 @@ def test_memory_forgets_the_least_recently_used_session_past_the_cap():
     assert mem.history("never-seen") == [] and len(mem._sessions) == 2  # reading doesn't add a session
 
 
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_memory_forgets_messages_older_than_max_age():
+    # Tool results quote private notes: the chat mustn't keep a passage
+    # after the note itself has expired.
+    clock = _Clock()
+    mem = SessionStore(max_age_s=100, clock=clock)
+    mem.append("s", Message("user", [TextPart("old")]), Message("assistant", [ToolCallPart("1", "search_notes", {})]),
+               Message("tool", [ToolResultPart("1", "search_notes", {"results": ["a passage"]})]))
+    clock.now = 50
+    mem.append("s", Message("assistant"), Message("user", [TextPart("new")]))
+
+    clock.now = 99  # nothing old enough yet
+    assert len(mem.history("s")) == 5
+    clock.now = 101  # the first turn is past max_age; its answer (added at 50) goes with it, not orphaned
+    assert [(m.role, m.parts) for m in mem.history("s")] == [("user", [TextPart("new")])]
+    clock.now = 151
+    assert mem.history("s") == [] and "s" not in mem._sessions
+
+
+def test_memory_expires_chats_nobody_reads_again():
+    # A closed tab never calls history() again; another session's activity sweeps it.
+    clock = _Clock()
+    mem = SessionStore(max_age_s=100, clock=clock)
+    mem.append("closed-tab", Message("user"))
+    clock.now = 150
+    mem.append("other", Message("user"))
+
+    assert list(mem._sessions) == ["other"]
+
+
+def test_memory_expiry_copes_with_a_session_emptied_by_remove():
+    # A stopped first turn removes the session's only messages.
+    clock = _Clock()
+    mem = SessionStore(max_age_s=100, clock=clock)
+    question = Message("user")
+    mem.append("s", question)
+    assert mem.remove("s", [question])
+    clock.now = 150
+
+    assert mem.history("s") == []
+
+
 async def test_the_turns_time_zone_reaches_current_datetime():
     provider = FakeProvider([tool_turn("current_datetime", {}), text_turn("ok")])
     agent = Agent(provider, build_registry(provider, VectorStore(":memory:")), SessionStore())

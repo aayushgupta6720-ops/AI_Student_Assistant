@@ -6,6 +6,7 @@ from app.api.ratelimit import build_rate_limiters
 from app.inference.provider import QuotaExceededError
 from app.knowledge.ingest import ingest_dir, ingest_file
 from app.knowledge.store import VectorStore
+from app.knowledge.uploads import UPLOAD_TTL_S
 from tests.fake_provider import FakeProvider
 
 
@@ -148,6 +149,8 @@ async def test_app_still_boots_when_the_startup_ingest_fails(tmp_path, store, mo
     async with main.lifespan(main.app):
         assert main.app.state.store.count() == 0
         assert main.app.state.agent is not None
+        # Chat history quotes private notes, so it has to expire with them.
+        assert main.app.state.memory.max_age_s == UPLOAD_TTL_S
 
 
 async def test_startup_syncs_the_index_and_drops_private_notes_from_another_model(tmp_path, store, monkeypatch):
