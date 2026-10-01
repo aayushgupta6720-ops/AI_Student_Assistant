@@ -17,7 +17,7 @@ SHARED = ""
 # Bumped when the table layout changes. The store only holds derived data
 # (re-ingestable from data/notes), so an older layout is dropped rather than
 # migrated, and startup re-ingests the now-empty store.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -35,6 +35,7 @@ class VectorStore:
         if self._conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
             with self._conn:
                 self._conn.execute("DROP TABLE IF EXISTS chunks")
+                self._conn.execute("DROP TABLE IF EXISTS docs")
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS chunks (
@@ -50,6 +51,17 @@ class VectorStore:
                    PRIMARY KEY (owner, doc_id, chunk_index)
                )"""
         )
+        # Each note's whole text, as chunked, for read_note. The chunks can't
+        # rebuild it: each opens with its headings and repeats the previous
+        # chunk's last words. A row only lives as long as its doc's chunks.
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS docs (
+                   owner TEXT NOT NULL,
+                   doc_id TEXT NOT NULL,
+                   text TEXT NOT NULL,
+                   PRIMARY KEY (owner, doc_id)
+               )"""
+        )
         self._conn.commit()
         self._cache: tuple[np.ndarray, list[StoredChunk], list[str]] | None = None
 
@@ -60,12 +72,18 @@ class VectorStore:
         embeddings: list[list[float]],
         owner: str | None = None,
         embedded_with: str = "",
+        source: str | None = None,
     ) -> None:
+        """Store a doc's chunks, replacing any it had. `source` is the whole
+        note they were cut from, for note_text; without it the doc has none."""
         assert len(texts) == len(embeddings)
         owner = owner or SHARED
         now = time.time()
         with self._conn:
             self._conn.execute("DELETE FROM chunks WHERE owner = ? AND doc_id = ?", (owner, doc_id))
+            self._conn.execute("DELETE FROM docs WHERE owner = ? AND doc_id = ?", (owner, doc_id))
+            if source is not None:
+                self._conn.execute("INSERT INTO docs VALUES (?, ?, ?)", (owner, doc_id, source))
             self._conn.executemany(
                 "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
@@ -75,14 +93,32 @@ class VectorStore:
             )
         self._cache = None
 
-    def is_current(self, doc_id: str, texts: list[str], embedded_with: str, owner: str | None = None) -> bool:
+    def is_current(
+        self, doc_id: str, texts: list[str], embedded_with: str, owner: str | None = None, source: str | None = None
+    ) -> bool:
         """Whether `owner`'s doc is stored as exactly `texts`, embedded with
-        `embedded_with`: then embedding it again would change nothing."""
+        `embedded_with`, and with `source` as its text: then storing it again
+        would change nothing."""
         rows = self._conn.execute(
             "SELECT text, embedded_with FROM chunks WHERE owner = ? AND doc_id = ? ORDER BY chunk_index",
             (owner or SHARED, doc_id),
         ).fetchall()
-        return [t for t, _ in rows] == texts and all(e == embedded_with for _, e in rows)
+        current = [t for t, _ in rows] == texts and all(e == embedded_with for _, e in rows)
+        return current and self._text(owner or SHARED, doc_id) == source
+
+    def note_text(self, doc_id: str, owner: str | None = None) -> str | None:
+        """The whole text of a doc `owner` can see: its own private note of
+        that id, else the shared one. None if there's neither, or the doc was
+        stored without its text."""
+        if owner:
+            text = self._text(owner, doc_id)
+            if text is not None:
+                return text
+        return self._text(SHARED, doc_id)
+
+    def _text(self, owner: str, doc_id: str) -> str | None:
+        row = self._conn.execute("SELECT text FROM docs WHERE owner = ? AND doc_id = ?", (owner, doc_id)).fetchone()
+        return row[0] if row else None
 
     def delete_doc(self, doc_id: str, owner: str | None = None) -> bool:
         """Delete one doc of `owner` (the shared notes when None). Returns
@@ -91,6 +127,7 @@ class VectorStore:
             cur = self._conn.execute(
                 "DELETE FROM chunks WHERE owner = ? AND doc_id = ?", (owner or SHARED, doc_id)
             )
+            self._conn.execute("DELETE FROM docs WHERE owner = ? AND doc_id = ?", (owner or SHARED, doc_id))
         self._cache = None
         return cur.rowcount > 0
 
@@ -100,6 +137,7 @@ class VectorStore:
             raise ValueError("refusing to delete the shared notes")
         with self._conn:
             cur = self._conn.execute("DELETE FROM chunks WHERE owner = ?", (owner,))
+            self._conn.execute("DELETE FROM docs WHERE owner = ?", (owner,))
         self._cache = None
         return cur.rowcount
 
@@ -111,6 +149,7 @@ class VectorStore:
                 "DELETE FROM chunks WHERE owner != ? AND created_at < ?",
                 (SHARED, time.time() - older_than_s),
             )
+            self._drop_texts_without_chunks()
         if cur.rowcount:  # runs before every search, so keep the cache when nothing expired
             self._cache = None
         return cur.rowcount
@@ -149,6 +188,7 @@ class VectorStore:
             cur = self._conn.execute(
                 "DELETE FROM chunks WHERE owner != ? AND embedded_with != ?", (SHARED, embedded_with)
             )
+            self._drop_texts_without_chunks()
         if cur.rowcount:
             self._cache = None
         return cur.rowcount
@@ -160,7 +200,17 @@ class VectorStore:
     def clear(self) -> None:
         with self._conn:
             self._conn.execute("DELETE FROM chunks")
+            self._conn.execute("DELETE FROM docs")
         self._cache = None
+
+    def _drop_texts_without_chunks(self) -> None:
+        """Delete the text of any doc whose chunks are gone, so an expired
+        note can't be read after it can no longer be found."""
+        self._conn.execute(
+            """DELETE FROM docs WHERE NOT EXISTS (
+                   SELECT 1 FROM chunks WHERE chunks.owner = docs.owner AND chunks.doc_id = docs.doc_id
+               )"""
+        )
 
     def _matrix(self) -> tuple[np.ndarray, list[StoredChunk], list[str]]:
         if self._cache is None:

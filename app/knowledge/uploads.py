@@ -192,7 +192,7 @@ async def store_private_note(
     with time_step("inference", "embed_documents", doc_id=doc_id, chunks=len(chunks)):
         embeddings = await provider.embed(chunks, "document")
     with time_step("knowledge", "store_upsert", doc_id=doc_id):
-        store.upsert_doc(doc_id, chunks, embeddings, owner=session_id, embedded_with=embedded_with())
+        store.upsert_doc(doc_id, chunks, embeddings, owner=session_id, embedded_with=embedded_with(), source=text)
     return {"doc_id": doc_id, "chunks": len(chunks)}
 
 

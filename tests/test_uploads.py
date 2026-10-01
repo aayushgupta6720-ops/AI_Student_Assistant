@@ -248,6 +248,20 @@ async def test_agent_searches_are_scoped_to_the_session_it_serves(store, every_m
     assert await found("bob") == {"shared-note"}
 
 
+async def test_the_agent_can_read_a_whole_upload_and_lists_it_as_a_source(store):
+    # For a question that needs all of a note, the model reads it with read_note;
+    # the note then shows as a source of the answer, as it would after a search.
+    provider = FakeProvider([tool_turn("read_note", {"doc_id": "cells"}), text_turn("ok")])
+    await ingest_upload("alice", "cells.md", b"Mitochondria make ATP.\n\nRibosomes make proteins.", store, provider)
+    agent = Agent(provider, build_registry(provider, store), SessionStore())
+
+    events = [e async for e in agent.run_turn("alice", "summarise my cells note")]
+
+    [result] = [e for e in events if type(e).__name__ == "AgentToolResult"]
+    assert result.result["text"] == "# cells\n\nMitochondria make ATP.\n\nRibosomes make proteins."  # as uploaded
+    assert events[-1].sources == ["cells"]
+
+
 async def test_expired_uploads_stop_showing_up_without_waiting_for_another_upload(store, monkeypatch):
     provider = FakeProvider(turns=[])
     await ingest_upload("alice", "cells.md", b"Mitochondria.", store, provider)

@@ -279,6 +279,34 @@ async def fetch_url(url: str, max_chars: int = 4000) -> dict:
 # ---- search_notes / save_note ---------------------------------------------------
 
 MAX_SEARCH_RESULTS = 10
+# read_note returns a note this many characters at a time. A page stays in
+# the chat's history and is resent on every later model call, so a whole
+# 200,000-character note in one result would make each call huge.
+READ_PAGE_CHARS = 8000
+
+
+def _pages(text: str, size: int = READ_PAGE_CHARS) -> list[str]:
+    """text as pages of at most `size` characters, broken between paragraphs
+    so a page doesn't stop mid-sentence; a paragraph longer than a page is
+    cut where it must be."""
+    pages: list[str] = []
+    current = ""
+    for paragraph in text.split("\n\n"):
+        while len(paragraph) > size:
+            if current:
+                pages.append(current)
+                current = ""
+            pages.append(paragraph[:size])
+            paragraph = paragraph[size:]
+        candidate = f"{current}\n\n{paragraph}" if current else paragraph
+        if len(candidate) > size:
+            pages.append(current)
+            current = paragraph
+        else:
+            current = candidate
+    if current or not pages:
+        pages.append(current)
+    return pages
 
 
 def _note_id(store: VectorStore, session_id: str | None, title: str) -> str:
@@ -318,6 +346,17 @@ def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> T
             ],
         }
 
+    def read_note(doc_id: str, page: int = 1) -> dict:
+        # The same notes a search sees: the shared ones and this session's own.
+        text = store.note_text(doc_id, owner=current_session.get())
+        if text is None:
+            raise ValueError(f"no note has the doc_id {doc_id!r}; take one from search_notes results")
+        pages = _pages(text)
+        page = int(page)
+        if not 1 <= page <= len(pages):
+            raise ValueError(f"page {page} doesn't exist; the note has {len(pages)} page(s)")
+        return {"doc_id": doc_id, "page": page, "pages_total": len(pages), "text": pages[page - 1]}
+
     async def save_note(title: str, content: str) -> dict:
         # A private note, like an upload. The shared notes are the same for
         # every visitor, so a note saved there could be read, and overwritten,
@@ -351,6 +390,26 @@ def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> T
                 "required": ["query"],
             },
             search_notes,
+        )
+    )
+    registry.register(
+        Tool(
+            "read_note",
+            "Read one of the user's notes in full, a page (up to "
+            f"{READ_PAGE_CHARS:,} characters) at a time. search_notes returns only a few "
+            "passages, so use this when a question needs more of a note than that: "
+            "summaries, quizzes, 'list every...' questions, or anything spanning several "
+            "sections. Take the doc_id from search_notes results. The result gives "
+            "pages_total; read every page (several at once is fine) before answering.",
+            {
+                "type": "object",
+                "properties": {
+                    "doc_id": {"type": "string", "description": "The note's doc_id, from search_notes."},
+                    "page": {"type": "integer", "minimum": 1, "description": "Which page (default 1)."},
+                },
+                "required": ["doc_id"],
+            },
+            read_note,
         )
     )
     registry.register(

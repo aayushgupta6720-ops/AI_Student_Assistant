@@ -60,11 +60,12 @@ What visitors type, and the text of tool arguments, is logged as its length. It 
 - Notes are split into chunks of up to 800 characters, each labelled with the note title and section headings it sits under. Splitting is line-based: fenced code blocks stay whole (so a `# comment` in code isn't taken for a heading), and a heading directly after a list starts its own section.
 - A search returns up to 4 passages (`search_notes` accepts 1 to 10), minus any scoring more than 0.1 below the best match (`RETRIEVAL_SCORE_MARGIN`). For questions about the sample notes, the right note scored 0.64–0.78 and unrelated ones 0.50–0.58, and before the cutoff every answer cited the whole top 4.
 - The cutoff is relative, not absolute, because a terse query's right answer can score as low as an unrelated note does for another query ("headphones" finds the travel checklist at 0.559, while an unrelated question's best match is 0.542).
+- **Whole notes.** A search returns a few passages, so a question that needs a whole note (a summary, a quiz, "list every…") uses `read_note`: the model finds the note with `search_notes`, then reads it in pages of up to 8,000 characters. Pages are capped because every tool result is resent on each later model call. The store keeps each note's whole text beside its chunks, since the chunks can't rebuild it (each opens with its headings and repeats the end of the one before), and the text is scoped and deleted exactly like the chunks.
 - Clicking a source chip shows the passages the search returned from that note, the text the answer was based on. The `done` event carries them as `passages`.
 
 ## Private notes
 
-- **Scoping.** Every stored chunk has an owner: `""` for the shared notes, or the session id that uploaded or saved it. `search()` masks out other owners' rows, and the agent sets a `current_session` context variable each turn, so `search_notes` and `save_note` are scoped without passing a session id through every tool. `save_note` never writes to `data/notes/`, which is the same for every visitor.
+- **Scoping.** Every stored chunk has an owner: `""` for the shared notes, or the session id that uploaded or saved it. `search()` masks out other owners' rows, and the agent sets a `current_session` context variable each turn, so `search_notes`, `read_note` and `save_note` are scoped without passing a session id through every tool. `save_note` never writes to `data/notes/`, which is the same for every visitor.
 - **Lifetime.** Private notes are deleted on New session (`POST /reset/{session_id}`, unless `?keep_uploads=true`, which a page reload uses) or after 24 hours. They live in the same index as the shared notes, so a deploy or restart also clears them. Closing the tab deletes nothing: the browser forgets the session id (it's in `sessionStorage`), and the notes stay, unreachable, until one of those.
 - **Chat history expires too.** Tool results quote private notes, so `SessionStore` forgets every message older than 24 hours (`max_age_s`, set in `app/main.py`). It sweeps every session on each read and write, so the chat of a closed tab expires as well, and it cuts at a user message so no tool result loses its tool call.
 - **Caps.** A session can have 10 private notes at a time, uploads and saved notes together. An upload is at most 2 MB and 200,000 characters of text, and a saved note at most 200,000 characters. The whole app keeps at most 10,000 private chunks (`MAX_PRIVATE_CHUNKS`), because search holds them all in memory: 10,000 took the process from 86 MB to a 205 MB peak. Past the cap, uploads get a 503 until older notes expire.
@@ -164,6 +165,8 @@ python -m scripts.eval_routing --repeat 3 --only "assistant built"
 
 The `assistant_v1` prompt answered "How is this assistant built?" from general knowledge instead of searching the notes that document it (0/1 in the eval, and seen in production). `assistant_v2` added one rule saying the notes also document the assistant itself. It searched in 2/2 runs, and every other question was still routed correctly. The script waits out a per-minute rate limit and retries that case once.
 
+With `read_note` (`assistant_v3`), a summary question must search and then read. A question that expects only a search may also read the note it found: "How is this assistant built?" started reading the architecture note, which costs a call but isn't wrong. With that rule, `assistant_v3` routed 10/10 questions correctly.
+
 ## Evaluating answers
 
 `eval_routing` only checks which tool the model picks. `scripts/eval_answers.py` checks the answers themselves. It uploads three study notes from `data/eval/notes` the way a visitor would: as private notes under one session, alongside the shared notes, which compete in every search as they do live. Then it asks each of the 20 questions in `data/eval/cases.json` in a fresh chat. The notes are a 17,000-character cell biology note (33 chunks, so one search sees about an eighth of it), a course handbook full of codes (`T07`, `MAT1150`, `MPSH 2A`), and a physics formula sheet.
@@ -197,3 +200,16 @@ A run spends far more than the routing eval, so it uses `EVAL_GEMINI_API_KEY`, a
 - **Whole-document questions fail every time.** Asked to list every term the biology note defines, the model searched 2 to 5 times and listed 4 or 7 of the 12. On the formula sheet it searched once and named 4 of 9 laws. A search returns at most four passages, and the model stops after a few searches.
 - **"What's happening in MPSH 2A?" fails every time.** No search for the venue code returns the handbook passage that names it, so the model says, correctly given what it found, that the notes don't mention it. The other exact-term questions passed.
 - **Textbook questions need "my notes".** In the first run, "What's the net ATP yield of glycolysis?" and three similar questions passed without any search: the model answered from its own knowledge, so they tested nothing. They now ask about "my notes", and every case's line shows its search count.
+
+**With `read_note`** (prompt `assistant_v3`, which says to read the whole note for summaries, quizzes and "list every…" questions), two runs:
+
+| Category | Baseline | With `read_note` |
+|---|---|---|
+| `single_fact` | 6/6 | 6/6, 6/6 |
+| `exact_term` | 6/7 | 6/7, 5/7 |
+| `whole_doc` | 0/4 (38%, 51% of facts) | 3/4, 4/4 (97%, 100% of facts) |
+| `not_in_notes` | 3/3 | 3/3, 3/3 |
+| All | 15/20 | 18/20, 18/20 |
+
+- Every whole-document question now searches once and reads the note. The one miss listed 8 of the formula sheet's 9 laws, leaving out Young's modulus.
+- The exact-term misses are search, not `read_note`. In the second run, "When does tutorial group T07 meet?" failed: the model searched once and the handbook didn't come back. Searching for a bare code misses it: `"T07"` returns the architecture note, the pasta recipe and the biology note, and `"MPSH 2A"` only the physics sheet, while `"tutorial group T07"` finds the handbook. Whether a code question passes depends on how the model words its search, which keyword search would fix.

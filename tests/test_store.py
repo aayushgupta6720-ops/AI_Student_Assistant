@@ -91,3 +91,38 @@ def test_a_store_in_the_old_layout_is_rebuilt_empty(tmp_path):
     assert store.count() == 0
     store.upsert_doc("a", ["new"], [[1.0]], owner="s")
     assert store.list_docs(owner="s") == [{"doc_id": "a", "chunks": 1, "uploaded": True}]
+
+
+def test_a_notes_text_is_scoped_like_its_chunks(store):
+    store.upsert_doc("shared", ["shared note"], [[1, 0, 0]], source="the shared note")
+    store.upsert_doc("lecture", ["alice's lecture"], [[1, 0.1, 0]], owner="alice", source="alice's whole lecture")
+
+    assert store.note_text("lecture", owner="alice") == "alice's whole lecture"
+    assert store.note_text("lecture", owner="bob") is None  # bob's lecture was stored without its text
+    assert store.note_text("lecture", owner="carol") is None and store.note_text("lecture") is None
+    assert store.note_text("shared", owner="carol") == "the shared note"
+
+
+@pytest.mark.parametrize("remove", [
+    lambda s: s.delete_doc("lecture", owner="alice"),
+    lambda s: s.delete_owner("alice"),
+    lambda s: s.purge_stale_private("another-model@768"),
+    lambda s: s.upsert_doc("lecture", ["replaced"], [[1, 0, 0]], owner="alice"),  # without a new text
+], ids=["delete_doc", "delete_owner", "purge_stale_private", "upsert"])
+def test_a_notes_text_goes_when_its_chunks_do(store, remove):
+    # Otherwise read_note could still read a note that's been deleted or has expired.
+    store.upsert_doc("lecture", ["alice's lecture"], [[1, 0.1, 0]], owner="alice", source="alice's whole lecture")
+    remove(store)
+    assert store.note_text("lecture", owner="alice") is None
+
+
+def test_purged_uploads_lose_their_text_too(store, monkeypatch):
+    store.upsert_doc("lecture", ["alice's lecture"], [[1, 0.1, 0]], owner="alice", source="alice's whole lecture")
+    store.upsert_doc("shared", ["shared note"], [[1, 0, 0]], source="the shared note")
+    later = time.time() + 25 * 3600
+    monkeypatch.setattr(time, "time", lambda: later)
+
+    store.purge_uploads(older_than_s=24 * 3600)
+
+    assert store.note_text("lecture", owner="alice") is None
+    assert store.note_text("shared") == "the shared note"

@@ -163,7 +163,7 @@ async def test_startup_syncs_the_index_and_drops_private_notes_from_another_mode
     _write(notes, "same", "unchanged note")
     _write(notes, "old", "embedded by the previous model")
     monkeypatch.setattr(get_settings(), "notes_dir", notes)
-    store.upsert_doc("same", chunk_note("unchanged note"), [[1.0] * 4], embedded_with=embedded_with())
+    store.upsert_doc("same", chunk_note("unchanged note"), [[1.0] * 4], embedded_with=embedded_with(), source="unchanged note")
     store.upsert_doc("old", chunk_note("embedded by the previous model"), [[1.0] * 8], embedded_with="old-model@8")
     store.upsert_doc("mine", ["private"], [[1.0] * 8], owner="alice", embedded_with="old-model@8")
     provider = CountingProvider()
@@ -176,3 +176,13 @@ async def test_startup_syncs_the_index_and_drops_private_notes_from_another_mode
             {"doc_id": "old", "chunks": 1, "uploaded": False}, {"doc_id": "same", "chunks": 1, "uploaded": False},
         ]  # alice's note from the old model is gone: it can't be embedded again
         assert len(store.search([1.0] * 4, k=5, owner="alice")) == 2  # one vector size again
+
+
+async def test_shared_notes_keep_their_whole_text_for_read_note(tmp_path):
+    notes = tmp_path / "notes"
+    _write(notes, "plan", "# Plan\n\nStep one.\n\nStep two.")
+    store = VectorStore(tmp_path / "s.sqlite")
+
+    await ingest_dir(notes, store, FakeProvider(turns=[]))
+
+    assert store.note_text("plan", owner="any-session") == "# Plan\n\nStep one.\n\nStep two."

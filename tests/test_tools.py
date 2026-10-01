@@ -5,7 +5,7 @@ import pytest
 
 from app.knowledge.retrieval import current_session
 from app.knowledge.store import VectorStore
-from app.tools.builtin import build_registry, calculator, current_datetime, user_timezone
+from app.tools.builtin import READ_PAGE_CHARS, build_registry, calculator, current_datetime, user_timezone
 from app.tools.registry import Tool, ToolRegistry
 from tests.fake_provider import FakeProvider
 
@@ -73,7 +73,7 @@ async def test_builtin_registry_search_and_save(tmp_path, monkeypatch):
     provider = FakeProvider(turns=[])
     store = VectorStore(tmp_path / "s.sqlite")
     reg = build_registry(provider, store)
-    assert set(reg.names()) == {"search_notes", "save_note", "calculator", "current_datetime", "fetch_url"}
+    assert set(reg.names()) == {"search_notes", "read_note", "save_note", "calculator", "current_datetime", "fetch_url"}
 
     current_session.set("alice")
     saved = await reg.execute("save_note", {"title": "Groceries", "content": "milk, eggs"})
@@ -156,3 +156,49 @@ async def test_current_datetime_answers_in_the_users_time_zone(zone, offset):
 async def test_current_datetime_falls_back_to_the_server_zone(zone):
     user_timezone.set(zone)
     assert current_datetime()["iso"]  # no error; answers in the server's zone
+
+
+LONG_NOTE = "# Lecture\n\n" + "\n\n".join(f"Paragraph {i}. " + "word " * 300 for i in range(12))
+
+
+@pytest.fixture
+def note_store(tmp_path):
+    store = VectorStore(tmp_path / "s.sqlite")
+    store.upsert_doc("lecture", ["chunk"], [[1.0, 0, 0, 0]], owner="alice", source=LONG_NOTE)
+    store.upsert_doc("shared", ["chunk"], [[1.0, 0, 0, 0]], source="# Shared\n\nfor everyone")
+    return store
+
+
+async def test_read_note_returns_the_whole_note_page_by_page(note_store):
+    reg = build_registry(FakeProvider(turns=[]), note_store)
+    current_session.set("alice")
+
+    first = await reg.execute("read_note", {"doc_id": "lecture"})
+    total = first.result["pages_total"]
+    pages = [first.result] + [(await reg.execute("read_note", {"doc_id": "lecture", "page": n})).result
+                              for n in range(2, total + 1)]
+
+    assert total > 1 and all(len(p["text"]) <= READ_PAGE_CHARS for p in pages)
+    assert "\n\n".join(p["text"] for p in pages) == LONG_NOTE  # nothing lost or repeated
+    assert [p["page"] for p in pages] == list(range(1, total + 1))
+
+
+async def test_read_note_sees_what_a_search_would_and_nothing_more(note_store):
+    reg = build_registry(FakeProvider(turns=[]), note_store)
+    current_session.set("bob")
+
+    other = await reg.execute("read_note", {"doc_id": "lecture"})
+    shared = await reg.execute("read_note", {"doc_id": "shared"})
+
+    assert other.is_error and "no note has the doc_id" in other.result["error"]
+    assert shared.result["text"] == "# Shared\n\nfor everyone"
+
+
+@pytest.mark.parametrize("page", [0, 99, -1])
+async def test_read_note_refuses_pages_the_note_doesnt_have(note_store, page):
+    reg = build_registry(FakeProvider(turns=[]), note_store)
+    current_session.set("alice")
+
+    out = await reg.execute("read_note", {"doc_id": "lecture", "page": page})
+
+    assert out.is_error and "doesn't exist" in out.result["error"]

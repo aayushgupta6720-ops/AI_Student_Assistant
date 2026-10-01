@@ -45,19 +45,20 @@ def embedded_with() -> str:
 
 async def ingest_file(path: Path, store: VectorStore, provider: LLMProvider) -> int:
     doc_id = path.stem
-    chunks = chunk_note(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    chunks = chunk_note(text)
     if not chunks:
         store.delete_doc(doc_id)
         return 0
     # POST /ingest is open to every visitor, and embedding all the notes on
     # every call spent the shared quota for nothing: skip notes that haven't
     # changed since they were last embedded.
-    if store.is_current(doc_id, chunks, embedded_with()):
+    if store.is_current(doc_id, chunks, embedded_with(), source=text):
         return len(chunks)
     with time_step("inference", "embed_documents", doc_id=doc_id, chunks=len(chunks)):
         embeddings = await provider.embed(chunks, "document")
     with time_step("knowledge", "store_upsert", doc_id=doc_id):
-        store.upsert_doc(doc_id, chunks, embeddings, embedded_with=embedded_with())
+        store.upsert_doc(doc_id, chunks, embeddings, embedded_with=embedded_with(), source=text)
     return len(chunks)
 
 

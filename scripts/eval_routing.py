@@ -22,18 +22,27 @@ from app.knowledge.retrieval import get_store
 from app.tools.builtin import build_registry
 
 # (question, the tools it should use): the page's suggestions, plus questions
-# that are easy to route wrong in either direction.
+# that are easy to route wrong in either direction. A question that expects a
+# search may also read the note it found (see _routed_well).
 CASES: list[tuple[str, set[str]]] = [
     ("What's on my reading list?", {"search_notes"}),
     ("How is this assistant built?", {"search_notes"}),  # answered from memory once in production
     ("Which layer of this app talks to Gemini?", {"search_notes"}),
     ("What do I need to buy for the pasta?", {"search_notes"}),
+    ("Summarise the five-layer architecture note section by section.", {"search_notes", "read_note"}),
     ("What is 17% of 2,340?", {"calculator"}),
     ("What day is it today?", {"current_datetime"}),
     ("Save a note titled Groceries: milk, eggs, coffee", {"save_note"}),
     ("Hi", set()),
     ("What is the capital of France?", set()),
 ]
+
+
+def _routed_well(used: set[str], expected: set[str]) -> bool:
+    """Reading a note a search found costs a call but isn't wrong ("How is
+    this assistant built?" read the architecture note under assistant_v3), so
+    a search question may add read_note. A summary must read."""
+    return used == expected or ("search_notes" in expected and used == expected | {"read_note"})
 
 
 async def main() -> int:
@@ -60,7 +69,7 @@ async def main() -> int:
                 try:
                     [done] = [e async for e in agent.run_turn(session, question) if isinstance(e, AgentDone)]
                     used = set(done.tools_used)
-                    ok = used == expected
+                    ok = _routed_well(used, expected)
                     got = ", ".join(sorted(used)) or "no tools"
                     break
                 except QuotaExceededError as exc:
