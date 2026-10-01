@@ -1,0 +1,29 @@
+name: Tests
+
+# Runs the offline test suite on every push and pull request, on the
+# Python the Render service builds with (PYTHON_VERSION=3.12.7, set in the
+# dashboard). With Render's Auto-Deploy set to "After CI Checks Pass", a
+# commit that breaks the tests never reaches the live demo. Gemini is
+# faked (tests/fake_provider.py), so it needs no secrets and spends no quota.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"  # keep in step with PYTHON_VERSION on Render
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
