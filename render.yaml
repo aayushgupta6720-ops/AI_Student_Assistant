@@ -1,3 +1,6 @@
+# A Blueprint for deploying a new copy (New -> Blueprint). The live demo
+# (srv-dap12p00cd8s73bc3tv0) was created in the dashboard instead, so changes
+# here don't reach it: change its settings and env vars in the dashboard.
 services:
   - type: web
     name: ai-student-assistant

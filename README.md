@@ -19,11 +19,11 @@ The app itself is a study assistant. You can ask questions about a set of shared
 
 - **Streaming chat with tool calling.** The model decides when to use one of five tools (search notes, save a note, calculator, current date and time, read a web page or PDF), and answers stream in token by token over Server-Sent Events.
 - **Retrieval over your notes (RAG).** Notes are split into chunks, embedded with Gemini and searched by cosine similarity. Each answer lists the notes it used, and clicking one shows the exact passages.
-- **Private notes.** Uploads and saved notes belong to your chat session only: other visitors' searches never see them, and they're deleted with the session or after 24 hours.
+- **Private notes.** Uploads and saved notes belong to your chat session only: other visitors' searches never see them. They're deleted when you click New session, and otherwise within 24 hours (sooner if the free server restarts). The chat history that quotes them expires after 24 hours too.
 - **Visible architecture.** Under each answer is a timeline of every step and a bar showing how long each layer took.
 - **Stop button.** Stops an answer mid-stream without leaving the conversation history in a broken state.
 - **Built for a shared public demo.** Per-visitor rate limits, request size limits, safe URL fetching (no access to private networks) and sanitised Markdown rendering.
-- **Tested.** 180 offline tests using a scripted fake model, plus a small live evaluation of the model's tool choices.
+- **Tested.** Offline tests using a scripted fake model, run by GitHub Actions on every push, plus a small live evaluation of the model's tool choices.
 
 ## Tech stack
 
@@ -161,7 +161,7 @@ curl -N -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 pytest
 ```
 
-The 180 tests run offline in about two seconds. Instead of calling Gemini they use `tests/fake_provider.py`, a scripted model that returns tool calls and text on cue. That makes the agent loop, tools, retrieval, uploads, rate limits and API testable end to end without network access. `fetch_url` is tested against local HTTP servers.
+The tests run offline in about two seconds, and GitHub Actions runs them on every push (`.github/workflows/tests.yml`). Instead of calling Gemini they use `tests/fake_provider.py`, a scripted model that returns tool calls and text on cue. That makes the agent loop, tools, retrieval, uploads, rate limits and API testable end to end without network access. `fetch_url` is tested against local HTTP servers.
 
 Whether the model picks the right tool can only be checked against the real model, so there's also a small evaluation that asks nine typical questions and checks which tools each one used:
 
@@ -171,7 +171,7 @@ python -m scripts.eval_routing    # uses about 20 Gemini requests
 
 ## Deployment
 
-The live demo runs on Render's free plan, and `render.yaml` defines it as a Blueprint. In the Render dashboard, choose **New → Blueprint**, select this repository through your connected GitHub account, and enter your `GEMINI_API_KEY` when prompted. Render wipes the disk on every deploy, so the app rebuilds the index on startup. The [engineering notes](docs/ENGINEERING_NOTES.md#deploying-to-render) cover the rest, including the proxy header the rate limits depend on.
+The live demo runs on Render's free plan. `render.yaml` defines the service as a Blueprint for deploying your own copy (the live demo itself was created in the dashboard, so it doesn't read the file). In the Render dashboard, choose **New → Blueprint**, select this repository through your connected GitHub account, and enter your `GEMINI_API_KEY` when prompted. Render wipes the disk on every deploy, so the app rebuilds the index on startup. The [engineering notes](docs/ENGINEERING_NOTES.md#deploying-to-render) cover the rest, including the proxy header the rate limits depend on.
 
 ## Engineering challenges
 
@@ -199,7 +199,10 @@ Running a public demo on free tiers turned up problems I wouldn't have met in a 
 - User accounts instead of anonymous session ids
 - Rate-limit counters shared between instances, so the app can run on more than one server
 - OCR for scanned PDFs, which currently have no text to index
-- Continuous integration that runs the test suite on every push
+- Answers that cover a whole document: a search returns at most four passages, so summarising or quizzing on a long note only sees part of it
+- Keyword search alongside meaning-based search, so exact terms such as course codes and formula names aren't missed
+- An evaluation of answer quality (are answers correct and grounded in the notes), not only of which tool the model picks
+- The paid Gemini tier, whose terms don't let Google use uploaded notes to improve its products; the free tier's terms do
 - A Dockerfile, so it runs the same way anywhere
 
 ## Project structure
