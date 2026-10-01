@@ -169,6 +169,12 @@ Whether the model picks the right tool can only be checked against the real mode
 python -m scripts.eval_routing    # uses about 20 Gemini requests
 ```
 
+A second evaluation checks the answers themselves: it uploads three study notes and asks 20 questions, from single facts and course codes to whole-document summaries and questions the notes don't cover ([more](docs/ENGINEERING_NOTES.md#evaluating-answers)). It spends about 120 requests, so it runs on a separate key (`EVAL_GEMINI_API_KEY`):
+
+```bash
+python -m scripts.eval_answers
+```
+
 ## Deployment
 
 The live demo runs on Render's free plan. `render.yaml` defines the service as a Blueprint for deploying your own copy (the live demo itself was created in the dashboard, so it doesn't read the file). In the Render dashboard, choose **New → Blueprint**, select this repository through your connected GitHub account, and enter your `GEMINI_API_KEY` when prompted. Render wipes the disk on every deploy, so the app rebuilds the index on startup. The [engineering notes](docs/ENGINEERING_NOTES.md#deploying-to-render) cover the rest, including the proxy header the rate limits depend on.
@@ -201,7 +207,6 @@ Running a public demo on free tiers turned up problems I wouldn't have met in a 
 - OCR for scanned PDFs, which currently have no text to index
 - Answers that cover a whole document: a search returns at most four passages, so summarising or quizzing on a long note only sees part of it
 - Keyword search alongside meaning-based search, so exact terms such as course codes and formula names aren't missed
-- An evaluation of answer quality (are answers correct and grounded in the notes), not only of which tool the model picks
 - The paid Gemini tier, whose terms don't let Google use uploaded notes to improve its products; the free tier's terms do
 - A Dockerfile, so it runs the same way anywhere
 
@@ -220,6 +225,7 @@ app/
 client/                  index.html, app.js, style.css
 data/notes/*.md          the shared sample notes
 docs/                    ENGINEERING_NOTES.md: design details, limits and measurements
-scripts/                 ingest.py (index data/notes), eval_routing.py (live tool-routing check)
+scripts/                 ingest.py (index data/notes), eval_routing.py (live tool-routing check),
+                         eval_answers.py (live answer-quality check over data/eval)
 tests/                   pytest suite, with a scripted fake model
 ```

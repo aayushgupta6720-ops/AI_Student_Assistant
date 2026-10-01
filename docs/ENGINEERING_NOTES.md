@@ -163,3 +163,23 @@ python -m scripts.eval_routing --repeat 3 --only "assistant built"
 ```
 
 The `assistant_v1` prompt answered "How is this assistant built?" from general knowledge instead of searching the notes that document it (0/1 in the eval, and seen in production). `assistant_v2` added one rule saying the notes also document the assistant itself. It searched in 2/2 runs, and every other question was still routed correctly. The script waits out a per-minute rate limit and retries that case once.
+
+## Evaluating answers
+
+`eval_routing` only checks which tool the model picks. `scripts/eval_answers.py` checks the answers themselves. It uploads three study notes from `data/eval/notes` the way a visitor would: as private notes under one session, alongside the shared notes, which compete in every search as they do live. Then it asks each of the 20 questions in `data/eval/cases.json` in a fresh chat. The notes are a 17,000-character cell biology note (33 chunks, so one search sees about an eighth of it), a course handbook full of codes (`T07`, `MAT1150`, `MPSH 2A`), and a physics formula sheet.
+
+Each case lists regexes for the facts a right answer must contain. A case passes when the answer has all of them, or, for a question the notes don't cover, when the answer says so. There are four categories:
+
+- `single_fact`: the answer is in one place.
+- `exact_term`: the question hinges on a code or symbol, which search by meaning can miss.
+- `whole_doc`: the answer is spread over a whole note ("list every definition").
+- `not_in_notes`: the right answer is that the notes don't say.
+
+Each case also gets a search probe: one retrieval of the question, as `search_notes` would run it, to show whether a single search returns the right note and how many of the facts its passages hold.
+
+```bash
+python -m scripts.eval_answers                    # about 60 chat and 60 embedding requests
+python -m scripts.eval_answers --only whole_doc   # a category, or case ids
+```
+
+A run spends far more than the routing eval, so it uses `EVAL_GEMINI_API_KEY`, a key from a different Google project, and refuses to fall back to the live demo's key unless given `--allow-demo-key`. The offline tests check that every fact really is in the note its case names, so a failing case means the assistant missed it, not that the case can't be passed.

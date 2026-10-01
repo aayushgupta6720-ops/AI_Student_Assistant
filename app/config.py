@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     app_name: str = "AI_Student_Assistant"
 
     gemini_api_key: str = ""
+    # Only scripts/eval_answers.py reads this: a key from a different Google
+    # project, so an eval run doesn't spend the live demo's daily quota.
+    eval_gemini_api_key: str = ""
     generation_model: str = "gemini-3.5-flash-lite"
     embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 768
