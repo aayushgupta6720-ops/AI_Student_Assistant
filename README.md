@@ -18,7 +18,7 @@ The app itself is a study assistant. You can ask questions about a set of shared
 ## Features
 
 - **Streaming chat with tool calling.** The model decides when to use one of six tools (search notes, read a whole note, save a note, calculator, current date and time, read a web page or PDF), and answers stream in token by token over Server-Sent Events.
-- **Retrieval over your notes (RAG).** Notes are split into chunks, embedded with Gemini and searched by cosine similarity. Each answer lists the notes it used, and clicking one shows the exact passages.
+- **Retrieval over your notes (RAG).** Notes are split into chunks, embedded with Gemini and searched by cosine similarity, with codes and symbols such as `T07` or `MPSH 2A` also matched as exact keywords. Each answer lists the notes it used, and clicking one shows the exact passages.
 - **Private notes.** Uploads and saved notes belong to your chat session only: other visitors' searches never see them. They're deleted when you click New session, and otherwise within 24 hours (sooner if the free server restarts). The chat history that quotes them expires after 24 hours too.
 - **Visible architecture.** Under each answer is a timeline of every step and a bar showing how long each layer took.
 - **Stop button.** Stops an answer mid-stream without leaving the conversation history in a broken state.
@@ -206,7 +206,6 @@ Running a public demo on free tiers turned up problems I wouldn't have met in a 
 - User accounts instead of anonymous session ids
 - Rate-limit counters shared between instances, so the app can run on more than one server
 - OCR for scanned PDFs, which currently have no text to index
-- Keyword search alongside meaning-based search, so exact terms such as course codes and formula names aren't missed
 - The paid Gemini tier, whose terms don't let Google use uploaded notes to improve its products; the free tier's terms do
 - A Dockerfile, so it runs the same way anywhere
 

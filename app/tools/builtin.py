@@ -276,7 +276,7 @@ async def fetch_url(url: str, max_chars: int = 4000) -> dict:
     return {"url": str(final_url), "status": response.status_code, "type": "page", "text": _visible_text(html, max_chars)}
 
 
-# ---- search_notes / save_note ---------------------------------------------------
+# ---- search_notes / read_note / save_note ---------------------------------------
 
 MAX_SEARCH_RESULTS = 10
 # read_note returns a note this many characters at a time. A page stays in

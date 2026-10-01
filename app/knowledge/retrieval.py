@@ -1,4 +1,5 @@
 import contextvars
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -22,6 +23,19 @@ class RetrievedChunk:
 current_session: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_session", default=None
 )
+
+
+# Most a search adds from keyword matches. A code or symbol in a question
+# ("T07", "MPSH 2A", "MAT1150") is often all that marks the passage it's
+# about, and search by meaning missed it: "MPSH 2A" returned only the physics
+# sheet, never the handbook line naming that exam hall.
+MAX_KEYWORD_HITS = 2
+
+
+def identifiers(query: str) -> list[str]:
+    """The query's words that look like codes or symbols: any with a digit
+    ("T07", "2A", "n2"), or two or more capitals ("MPSH", "ISBN")."""
+    return [w for w in re.findall(r"\w+", query) if any(c.isdigit() for c in w) or (len(w) > 1 and w.isupper())]
 
 
 @lru_cache
@@ -50,4 +64,12 @@ async def retrieve(
     if hits:
         floor = hits[0].score - settings.retrieval_score_margin
         hits = [h for h in hits if h.score >= floor]
+    # Passages naming the query's codes come first, whatever their score by
+    # meaning, then the closest by meaning, k in all.
+    terms = identifiers(query)
+    if terms:
+        with time_step("knowledge", "keyword_search", terms=len(terms)):
+            exact = store.keyword_search(terms, query_vec, owner=current_session.get(), limit=min(k, MAX_KEYWORD_HITS))
+        seen = {(h.doc_id, h.chunk_index) for h in exact}
+        hits = (exact + [h for h in hits if (h.doc_id, h.chunk_index) not in seen])[:k]
     return [RetrievedChunk(h.doc_id, h.text, round(h.score, 4)) for h in hits]

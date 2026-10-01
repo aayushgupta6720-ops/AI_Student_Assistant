@@ -47,7 +47,8 @@ async def lifespan(app: FastAPI):
     if settings.notes_dir.exists():
         try:
             counts = await ingest_dir(settings.notes_dir, store, provider)
-            log_event(event="startup_ingest", docs=len(counts), chunks=store.count())
+            log_event(event="startup_ingest", docs=len(counts), chunks=store.count(),
+                      keyword_search=store.keyword_search_enabled)
         except Exception as exc:
             # A quota 429, a bad key or a network blip shouldn't keep the whole
             # app down: chat still works, and search_notes finds whatever was

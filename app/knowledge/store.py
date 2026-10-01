@@ -17,7 +17,7 @@ SHARED = ""
 # Bumped when the table layout changes. The store only holds derived data
 # (re-ingestable from data/notes), so an older layout is dropped rather than
 # migrated, and startup re-ingests the now-empty store.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass
@@ -36,6 +36,7 @@ class VectorStore:
             with self._conn:
                 self._conn.execute("DROP TABLE IF EXISTS chunks")
                 self._conn.execute("DROP TABLE IF EXISTS docs")
+                self._conn.execute("DROP TABLE IF EXISTS chunks_fts")
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS chunks (
@@ -62,8 +63,28 @@ class VectorStore:
                    PRIMARY KEY (owner, doc_id)
                )"""
         )
+        self.keyword_search_enabled = self._create_keyword_index()
         self._conn.commit()
         self._cache: tuple[np.ndarray, list[StoredChunk], list[str]] | None = None
+
+    def _create_keyword_index(self) -> bool:
+        """A full-text index of the chunks, kept in step with them by triggers,
+        for keyword_search. False if this SQLite was built without FTS5: then
+        search works as before, by meaning only."""
+        try:
+            self._conn.executescript(
+                """CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
+                       USING fts5(text, content='chunks', content_rowid='rowid');
+                   CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+                       INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+                   END;
+                   CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+                       INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+                   END;"""
+            )
+        except sqlite3.OperationalError:  # "no such module: fts5"
+            return False
+        return True
 
     def upsert_doc(
         self,
@@ -227,6 +248,36 @@ class VectorStore:
                 matrix = np.zeros((0, 0), dtype=np.float32)
             self._cache = (matrix, chunks, owners)
         return self._cache
+
+    def keyword_search(
+        self, terms: list[str], query_vec: list[float], owner: str | None = None, limit: int = 2, max_matches: int = 3
+    ) -> list[StoredChunk]:
+        """Chunks among the shared notes and `owner`'s uploads that contain one
+        of `terms` as a word, best match first. A term found in more than
+        `max_matches` of those chunks is ignored: it doesn't single a passage
+        out. Each chunk is scored against `query_vec`, like search's results."""
+        if not self.keyword_search_enabled:
+            return []
+        visible = "FROM chunks_fts JOIN chunks c ON c.rowid = chunks_fts.rowid WHERE chunks_fts MATCH ? AND c.owner IN (?, ?)"
+        owners = (SHARED, owner or SHARED)
+        rare = []
+        for term in dict.fromkeys(terms):  # each once, in order
+            phrase = '"' + term.replace('"', '""') + '"'
+            if 1 <= self._conn.execute(f"SELECT COUNT(*) {visible}", (phrase, *owners)).fetchone()[0] <= max_matches:
+                rare.append(phrase)
+        if not rare:
+            return []
+        rows = self._conn.execute(
+            f"SELECT c.doc_id, c.chunk_index, c.text, c.embedding {visible} ORDER BY bm25(chunks_fts) LIMIT ?",
+            (" OR ".join(rare), *owners, limit),
+        ).fetchall()
+        q = np.asarray(query_vec, dtype=np.float32)
+        q = q / (np.linalg.norm(q) or 1)
+        chunks = []
+        for doc_id, chunk_index, text, blob in rows:
+            vec = np.frombuffer(blob, dtype=np.float32)
+            chunks.append(StoredChunk(doc_id, chunk_index, text, float(vec @ q / (np.linalg.norm(vec) or 1))))
+        return chunks
 
     def search(self, query_vec: list[float], k: int, owner: str | None = None) -> list[StoredChunk]:
         """Top-k chunks among the shared notes and `owner`'s uploads."""

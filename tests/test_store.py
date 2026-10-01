@@ -126,3 +126,50 @@ def test_purged_uploads_lose_their_text_too(store, monkeypatch):
 
     assert store.note_text("lecture", owner="alice") is None
     assert store.note_text("shared") == "the shared note"
+
+
+@pytest.fixture
+def coded(tmp_path):
+    s = VectorStore(tmp_path / "k.sqlite")
+    s.upsert_doc("handbook", ["The final exam is in MPSH 2A.", "Tutorial T07 meets on Thursday."], [[1, 0], [0, 1]],
+                 owner="alice")
+    s.upsert_doc("timetable", ["Bob's T07 is on Monday."], [[1, 0]], owner="bob")
+    s.upsert_doc("shared", ["Exams are held in MPSH halls."], [[1, 0]])
+    return s
+
+
+def test_keyword_search_finds_a_code_in_the_notes_a_session_can_see(coded):
+    assert [h.text for h in coded.keyword_search(["T07"], [1, 0], owner="alice")] == ["Tutorial T07 meets on Thursday."]
+    assert [h.text for h in coded.keyword_search(["T07"], [1, 0], owner="carol")] == []
+    assert {h.doc_id for h in coded.keyword_search(["MPSH"], [1, 0], owner="carol")} == {"shared"}
+
+
+def test_keyword_search_ignores_a_term_too_common_to_single_out_a_passage(tmp_path):
+    s = VectorStore(tmp_path / "k.sqlite")
+    s.upsert_doc("bio", [f"ATP fact {i}" for i in range(4)] + ["Only here: p53."], [[1, 0]] * 5)
+
+    assert s.keyword_search(["ATP"], [1, 0], max_matches=3) == []
+    assert [h.text for h in s.keyword_search(["ATP", "p53"], [1, 0], max_matches=3)] == ["Only here: p53."]
+
+
+@pytest.mark.parametrize("remove", [
+    lambda s: s.delete_doc("handbook", owner="alice"),
+    lambda s: s.delete_owner("alice"),
+    lambda s: s.upsert_doc("handbook", ["Rewritten without the code."], [[1, 0]], owner="alice"),
+    lambda s: s.clear(),
+], ids=["delete_doc", "delete_owner", "upsert", "clear"])
+def test_the_keyword_index_forgets_removed_chunks(coded, remove):
+    remove(coded)
+    assert coded.keyword_search(["T07"], [1, 0], owner="alice") == []
+    # Searches join back to the chunks, which hides a stale index entry, but it
+    # would still count towards a term's matches. FTS5 checks the index itself.
+    coded._conn.execute("INSERT INTO chunks_fts(chunks_fts, rank) VALUES ('integrity-check', 1)")  # 1: against the chunks
+
+
+def test_without_fts5_search_works_by_meaning_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(VectorStore, "_create_keyword_index", lambda self: False)
+    s = VectorStore(tmp_path / "k.sqlite")
+    s.upsert_doc("handbook", ["The final exam is in MPSH 2A."], [[1, 0]])
+
+    assert not s.keyword_search_enabled and s.keyword_search(["MPSH"], [1, 0]) == []
+    assert [h.doc_id for h in s.search([1, 0], k=1)] == ["handbook"]

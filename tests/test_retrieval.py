@@ -1,6 +1,8 @@
 import math
 
-from app.knowledge.retrieval import retrieve
+import pytest
+
+from app.knowledge.retrieval import current_session, identifiers, retrieve
 from app.knowledge.store import VectorStore
 
 
@@ -36,3 +38,53 @@ async def test_the_best_match_is_kept_however_weak(tmp_path):
     hits = await retrieve("headphones", QueryProvider(), store, k=4)
 
     assert [h.doc_id for h in hits] == ["travel"]
+
+
+def _handbook_store(tmp_path) -> VectorStore:
+    """The physics sheet scores 0.9 by meaning for any query; the handbook
+    line naming the exam hall scores 0.1, far below the cutoff."""
+    store = VectorStore(tmp_path / "s.sqlite")
+    store.upsert_doc("physics", ["Bernoulli: pressure falls where a fluid speeds up."], [[0.9, math.sqrt(1 - 0.81)]])
+    store.upsert_doc("handbook", ["The final exam is on 28 November in MPSH 2A."], [[0.1, math.sqrt(1 - 0.01)]])
+    return store
+
+
+async def test_a_code_in_the_query_brings_the_passage_that_names_it_first(tmp_path):
+    # "MPSH 2A" returned only the physics sheet in the answer eval, every run.
+    hits = await retrieve("What's happening in MPSH 2A?", QueryProvider(), _handbook_store(tmp_path), k=4)
+
+    assert [h.doc_id for h in hits] == ["handbook", "physics"]
+    assert hits[0].score == pytest.approx(0.1, abs=1e-4)  # still scored by meaning, like any passage
+
+
+async def test_a_question_without_codes_searches_by_meaning_alone(tmp_path):
+    hits = await retrieve("What's happening in the exam hall?", QueryProvider(), _handbook_store(tmp_path), k=4)
+
+    assert [h.doc_id for h in hits] == ["physics"]
+
+
+async def test_keyword_matches_count_towards_k(tmp_path):
+    hits = await retrieve("MPSH 2A", QueryProvider(), _handbook_store(tmp_path), k=1)
+
+    assert [h.doc_id for h in hits] == ["handbook"]
+
+
+async def test_keyword_matches_only_come_from_notes_the_session_can_see(tmp_path):
+    store = _handbook_store(tmp_path)
+    store.upsert_doc("timetable", ["Bob's tutorial T07 is on Monday."], [[0.0, 1.0]], owner="bob")
+
+    current_session.set("alice")
+    hits = await retrieve("When is T07?", QueryProvider(), store, k=4)
+
+    assert "timetable" not in {h.doc_id for h in hits}
+
+
+@pytest.mark.parametrize(("query", "terms"), [
+    ("What's happening in MPSH 2A?", ["MPSH", "2A"]),
+    ("Why does MAT1150 matter for CSC2204?", ["MAT1150", "CSC2204"]),
+    ("what does n2 mean in snell's law", ["n2"]),
+    ("What is on my reading list?", []),
+    ("I want to know", []),  # one capital isn't a code
+])
+def test_codes_and_symbols_are_what_get_matched_as_keywords(query, terms):
+    assert identifiers(query) == terms
