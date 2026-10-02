@@ -82,7 +82,16 @@ So text extraction now:
 - skips pages with more than 512 KB of drawing instructions (drawings; a page of text is tens of KB);
 - parses at most 4 MB of instructions per PDF.
 
-That PDF is now refused in under 0.1 s. The worst variant tested, 40 pages each just under the per-page limit, is refused in 1.8 s with 111 MB peak memory. Scanned PDFs without a text layer are refused with a message saying so.
+That PDF is now refused in under 0.1 s. The worst variant tested, 40 pages each just under the per-page limit, is refused in 1.8 s with 111 MB peak memory. 
+
+**Scanned PDFs.** A PDF whose pages have no text layer is sent to Gemini, which transcribes it to Markdown; the transcription is then stored like any upload. A test scan of a lecture handout came back word for word in 2.4 s (3.2 s for the whole upload, embedding included). Each one is a chat-model request from the 500 a day every visitor's chats share, so:
+
+- A scan can have at most 10 pages, and each visitor can upload 5 a day.
+- Everything that would refuse the note anyway (too many pages, the session's 10 notes, the server's private-chunk cap) is checked before the request, so none is spent on a note that can't be stored.
+- A transcription that didn't finish isn't stored half-done. When Gemini stops early, the upload is refused with the reason: the text was too long, it was blocked, or it looked like published text Gemini won't reproduce (a scanned textbook page can be).
+- A PDF with some typed and some scanned pages only has its typed text indexed, since it does have a text layer.
+
+`fetch_url` still refuses a scanned PDF link: transcribing it would spend a request on every link the model follows.
 
 ## Tool safety
 
@@ -105,6 +114,7 @@ The free-tier quota is shared by everyone using the app, so each visitor (an IP 
 | Uploads | 10 an hour | `UPLOAD_LIMIT_PER_HOUR` |
 | Note chunks (uploads and saved notes) | 1,000 a day | `UPLOAD_CHUNK_LIMIT_PER_DAY` |
 | Re-ingests | 3 an hour | `INGEST_LIMIT_PER_HOUR` |
+| Scanned PDFs (each one a chat-model request to transcribe) | 5 a day | `TRANSCRIBE_LIMIT_PER_DAY` |
 
 A setting of 0 turns that limit off.
 - **Chunks, not just files.** A single upload can be about 500 chunks to embed and keep in memory, and starting a new session doesn't reset the count. Notes saved from chat count against the same budget, or chat alone could fill the server-wide cap.

@@ -1,3 +1,4 @@
+import io
 import json
 import time
 import tracemalloc
@@ -16,6 +17,7 @@ from app.knowledge.ingest import ingest_dir
 from app.knowledge.retrieval import current_session, retrieve
 from app.knowledge.store import VectorStore
 from app.knowledge.uploads import (
+    MAX_SCANNED_PAGES,
     MAX_UPLOAD_BYTES,
     MAX_UPLOAD_CHARS,
     MAX_UPLOADS_PER_SESSION,
@@ -402,3 +404,87 @@ async def test_a_private_note_never_takes_a_shared_notes_id(store):
 
     assert upload["doc_id"] == "shared-note-2" and saved.result["doc_id"] == "shared-note-2"
     assert store.first_line("shared-note") is not None  # the shared note itself untouched
+
+
+# ---- scanned PDFs ------------------------------------------------------------------
+
+
+def _scan(pages: int = 1) -> bytes:
+    """A PDF of `pages` pages with no text layer, like a scanned document."""
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(612, 792)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+async def test_a_scanned_pdf_is_transcribed_by_the_model_and_stored_like_any_note(store):
+    provider = FakeProvider(turns=[], transcription="Enzymes lower activation energy.")
+    charged = []
+
+    result = await ingest_upload("alice", "lecture-7.pdf", _scan(2), store, provider, charge_transcription=lambda: charged.append(1))
+
+    assert result == {"doc_id": "lecture-7", "chunks": 1, "transcribed": True}
+    assert provider.transcribed == [_scan(2)] and charged == [1]
+    assert store.note_text("lecture-7", owner="alice") == "# lecture 7\n\nEnzymes lower activation energy."
+
+
+async def test_a_pdf_with_text_is_never_sent_to_the_model(store):
+    provider = FakeProvider(turns=[], transcription="should not be used")
+
+    result = await ingest_upload("alice", "dna.pdf", _pdf("DNA is a double helix"), store, provider,
+                                 charge_transcription=lambda: pytest.fail("charged for a PDF with text"))
+
+    assert provider.transcribed == [] and "transcribed" not in result
+
+
+async def test_a_long_scan_is_refused_before_any_model_call(store):
+    provider = FakeProvider(turns=[], transcription="text")
+
+    with pytest.raises(UploadError, match=f"up to {MAX_SCANNED_PAGES} pages; this one has {MAX_SCANNED_PAGES + 1}"):
+        await ingest_upload("alice", "book.pdf", _scan(MAX_SCANNED_PAGES + 1), store, provider)
+    assert provider.transcribed == []
+
+
+async def test_a_scan_the_session_has_no_room_for_costs_no_model_call(store):
+    provider = FakeProvider(turns=[], transcription="text")
+    for i in range(MAX_UPLOADS_PER_SESSION):
+        await ingest_upload("alice", f"n{i}.md", b"text", store, provider)
+
+    with pytest.raises(UploadError, match="up to 10 private notes"):
+        await ingest_upload("alice", "scan.pdf", _scan(), store, provider,
+                            charge_transcription=lambda: pytest.fail("charged for a scan that can't be stored"))
+    assert provider.transcribed == []
+
+
+@pytest.mark.parametrize(("transcription", "finish", "message"), [
+    ("", "stop", "No text could be read"),
+    ("Chapter 1 of a novel", "recitation", "published text"),
+    ("half of it", "max_tokens", "Split it into smaller files"),
+    ("blocked", "safety", "safety filters"),
+    ("x" * (MAX_UPLOAD_CHARS + 1), "stop", "over 200,000 characters"),
+])
+async def test_a_transcription_that_did_not_work_is_refused_with_the_reason(store, transcription, finish, message):
+    provider = FakeProvider(turns=[], transcription=transcription, transcribe_finish=finish)
+
+    with pytest.raises(UploadError, match=message):
+        await ingest_upload("alice", "scan.pdf", _scan(), store, provider)
+    assert [d["doc_id"] for d in store.list_docs(owner="alice")] == ["shared-note"]  # nothing half-stored
+
+
+async def test_scanned_pdfs_have_their_own_daily_limit(api, monkeypatch):
+    # Each one is a chat-model request from the quota every visitor's chats share.
+    settings = get_settings()
+    monkeypatch.setattr(settings, "transcribe_limit_per_day", 1)
+    monkeypatch.setattr(main.app.state, "rate_limiters", build_rate_limiters(settings))
+    main.app.state.provider.transcription = "Scanned notes."
+
+    first = await _upload(api, "alice", "scan1.pdf", _scan())
+    second = await _upload(api, "alice", "scan2.pdf", _scan())
+
+    assert first.json() == {"doc_id": "scan1", "chunks": 1, "transcribed": True}
+    assert second.status_code == 429 and "1 scanned PDFs a day" in second.json()["detail"]
+    assert (await _upload(api, "alice", "typed.md", b"Typed notes.")).status_code == 200  # other uploads unaffected

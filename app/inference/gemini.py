@@ -53,6 +53,12 @@ _FINISH_REASONS = {
     **dict.fromkeys(["RECITATION", "IMAGE_RECITATION"], "recitation"),
     **dict.fromkeys(["MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS"], "tool_call_error"),
 }
+# What transcribe_pdf asks for, alongside the PDF itself.
+_TRANSCRIBE_PROMPT = (
+    "Transcribe all the text in this document as Markdown, in reading order, page by page. "
+    "Keep headings, lists and tables. Output only the transcription: no introduction, "
+    "commentary or code fences."
+)
 # Gemini rejects an embed request with more than 100 texts ("at most 100
 # requests can be in one batch").
 MAX_TEXTS_PER_EMBED_REQUEST = 100
@@ -235,36 +241,9 @@ class GeminiProvider:
         )
         contents = _to_gemini_contents(messages)
 
-        # The HTTP request is only sent when the first chunk is pulled, so the
-        # 429 retry has to wrap that first pull, not the stream construction.
-        for attempt in range(1, _MAX_RATE_LIMIT_RETRIES + 1):
-            try:
-                stream = await _client().aio.models.generate_content_stream(
-                    model=self.model, contents=contents, config=config
-                )
-                first = await anext(stream)
-                break
-            except StopAsyncIteration:
-                yield StreamEnd(finish_reason="stop")
-                return
-            except ClientError as exc:
-                await _wait_to_retry(_rate_limit_backoff(exc, attempt), exc, attempt, "generate", self.model)
-            except ServerError as exc:
-                await _wait_to_retry(_overload_backoff(exc, attempt), exc, attempt, "generate", self.model)
-            except httpx.TimeoutException as exc:
-                raise _timeout_error() from exc
-
-        async def _chunks():
-            yield first
-            try:
-                async for c in stream:
-                    yield c
-            except httpx.TimeoutException as exc:  # the stream stalled partway
-                raise _timeout_error() from exc
-
         finish_reason = "stop"
         usage: Usage | None = None
-        async for chunk in _chunks():
+        async for chunk in self._stream(contents, config, "generate"):
             if chunk.usage_metadata is not None:
                 meta = chunk.usage_metadata
                 usage = Usage(
@@ -300,6 +279,59 @@ class GeminiProvider:
         if usage is not None:
             yield usage
         yield StreamEnd(finish_reason=finish_reason)
+
+    async def transcribe_pdf(self, data: bytes) -> tuple[str, str]:
+        """The text of a PDF that has no text layer (a scan), read by the
+        model, and the neutral reason it stopped: "stop" when it finished."""
+        contents = [types.Content(role="user", parts=[
+            types.Part.from_bytes(data=data, mime_type="application/pdf"),
+            types.Part(text=_TRANSCRIBE_PROMPT),
+        ])]
+        config = types.GenerateContentConfig(automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
+        text: list[str] = []
+        finish_reason = "stop"
+        async for chunk in self._stream(contents, config, "transcribe"):
+            if chunk.prompt_feedback is not None and chunk.prompt_feedback.block_reason:
+                finish_reason = "safety"  # the request itself was blocked: no candidates at all
+            if not chunk.candidates:
+                continue
+            candidate = chunk.candidates[0]
+            if candidate.finish_reason:
+                finish_reason = _FINISH_REASONS.get(candidate.finish_reason.name, "other")
+            for part in (candidate.content.parts if candidate.content else None) or []:
+                if part.text and not getattr(part, "thought", False):
+                    text.append(part.text)
+        return "".join(text), finish_reason
+
+    async def _stream(
+        self, contents: list[types.Content], config: types.GenerateContentConfig, call: str
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        """A generation's chunks, retrying a 429 or 503 until the first one
+        arrives, and raising ModelTimeoutError if the stream stalls."""
+        # The HTTP request is only sent when the first chunk is pulled, so the
+        # 429 retry has to wrap that first pull, not the stream construction.
+        for attempt in range(1, _MAX_RATE_LIMIT_RETRIES + 1):
+            try:
+                stream = await _client().aio.models.generate_content_stream(
+                    model=self.model, contents=contents, config=config
+                )
+                first = await anext(stream)
+                break
+            except StopAsyncIteration:
+                return
+            except ClientError as exc:
+                await _wait_to_retry(_rate_limit_backoff(exc, attempt), exc, attempt, call, self.model)
+            except ServerError as exc:
+                await _wait_to_retry(_overload_backoff(exc, attempt), exc, attempt, call, self.model)
+            except httpx.TimeoutException as exc:
+                raise _timeout_error() from exc
+
+        yield first
+        try:
+            async for chunk in stream:
+                yield chunk
+        except httpx.TimeoutException as exc:  # the stream stalled partway
+            raise _timeout_error() from exc
 
     async def embed(self, texts: list[str], kind: EmbedKind) -> list[list[float]]:
         vectors: list[list[float]] = []

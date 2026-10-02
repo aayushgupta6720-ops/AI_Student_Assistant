@@ -282,7 +282,8 @@ $("#upload-input").addEventListener("change", async (e) => {
     const res = await fetch("/notes/upload", { method: "POST", body: form });
     if (!res.ok) throw new Error(await errorText(res));
     const body = await res.json();
-    showNoteStatus(`Added ${body.doc_id} (${body.chunks} chunk${body.chunks === 1 ? "" : "s"}), private to this chat`, true);
+    const scanned = body.transcribed ? ", transcribed from a scanned PDF" : "";
+    showNoteStatus(`Added ${body.doc_id} (${body.chunks} chunk${body.chunks === 1 ? "" : "s"}${scanned}), private to this chat`, true);
   } catch (err) {
     showNoteStatus(`Upload failed: ${err.message}`, false);
   } finally {

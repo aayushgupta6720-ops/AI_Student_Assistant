@@ -131,6 +131,7 @@ async def upload_note(
             request.app.state.store,
             request.app.state.provider,
             charge=lambda chunks: charge(request, "upload_chunks", chunks),
+            charge_transcription=lambda: charge(request, "transcribe"),
         )
     except PrivateNotesFullError as exc:
         log_event(event="private_notes_full", session_id=session_id)
@@ -138,12 +139,13 @@ async def upload_note(
     except UploadError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (QuotaExceededError, ModelOverloadedError, ModelTimeoutError) as exc:
-        # Uploading embeds the note, so it fails when the model provider does.
+        # Uploading embeds the note (and reads a scanned PDF), so it fails when the model provider does.
         log_event(event="upload_failed", session_id=session_id, error=str(exc))
         raise HTTPException(
-            status_code=503, detail="The embedding model is unavailable right now, so the note couldn't be indexed. Try again later."
+            status_code=503, detail="The model is unavailable right now, so the note couldn't be read and indexed. Try again later."
         ) from exc
-    log_event(event="note_uploaded", session_id=session_id, doc_id=_loggable(result["doc_id"]), chunks=result["chunks"])
+    log_event(event="note_uploaded", session_id=session_id, doc_id=_loggable(result["doc_id"]), chunks=result["chunks"],
+              transcribed=result.get("transcribed", False))
     return result
 
 

@@ -6,9 +6,14 @@ from app.inference.types import Message, StreamEnd, StreamEvent, TextDelta, Tool
 
 
 class FakeProvider:
-    def __init__(self, turns: list[list[StreamEvent]], dim: int = 4) -> None:
+    def __init__(
+        self, turns: list[list[StreamEvent]], dim: int = 4, transcription: str = "", transcribe_finish: str = "stop"
+    ) -> None:
         self.turns = list(turns)
         self.dim = dim
+        self.transcription = transcription  # what transcribe_pdf "reads" from any PDF
+        self.transcribe_finish = transcribe_finish
+        self.transcribed: list[bytes] = []  # the PDFs it was asked to transcribe
         self.seen: list[list[Message]] = []
         self.systems: list[str] = []
         self.tools_seen: list[list[str]] = []  # the tool names each call was offered
@@ -35,6 +40,11 @@ class FakeProvider:
                 v[ord(ch) % self.dim] += 1
             out.append(v)
         return out
+
+
+    async def transcribe_pdf(self, data: bytes) -> tuple[str, str]:
+        self.transcribed.append(data)
+        return self.transcription, self.transcribe_finish
 
 
 def text_turn(text: str) -> list[StreamEvent]:

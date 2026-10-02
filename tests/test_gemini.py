@@ -320,3 +320,44 @@ async def test_an_error_that_is_not_retried_logs_no_retry(embed_calls, logged):
     with pytest.raises(QuotaExceededError):
         await gemini.GeminiProvider().embed(["a"], "query")
     assert logged == []
+
+
+def _transcript(*parts: types.Part, finish: str | None = None) -> types.GenerateContentResponse:
+    return types.GenerateContentResponse(candidates=[types.Candidate(
+        content=types.Content(role="model", parts=list(parts)), finish_reason=finish,
+    )])
+
+
+async def test_transcribe_pdf_sends_the_pdf_and_returns_its_text(monkeypatch):
+    calls = _install_stream(monkeypatch, lambda: _Stream([
+        _transcript(types.Part(text="Reading the page...", thought=True)),  # the model's thinking: not the text
+        _transcript(types.Part(text="# Lecture 7\n\nEnzymes ")),
+        _transcript(types.Part(text="lower activation energy."), finish="STOP"),
+    ]))
+
+    text, finish = await gemini.GeminiProvider().transcribe_pdf(b"%PDF-scan")
+
+    assert (text, finish) == ("# Lecture 7\n\nEnzymes lower activation energy.", "stop")
+    [pdf, prompt] = calls[0]["contents"][0].parts
+    assert (pdf.inline_data.mime_type, pdf.inline_data.data) == ("application/pdf", b"%PDF-scan")
+    assert "Transcribe" in prompt.text
+
+
+async def test_transcribe_pdf_says_why_the_model_stopped(monkeypatch):
+    _install_stream(monkeypatch, lambda: _Stream([_transcript(types.Part(text="Half of it"), finish="MAX_TOKENS")]))
+
+    assert await gemini.GeminiProvider().transcribe_pdf(b"%PDF") == ("Half of it", "max_tokens")
+
+
+async def test_transcribe_pdf_retries_a_rate_limit_like_chat_does(monkeypatch, logged):
+    outcomes = [_rate_limited("0.01s")]
+
+    def make_stream():
+        if outcomes:
+            raise outcomes.pop(0)
+        return _Stream([_transcript(types.Part(text="Notes."), finish="STOP")])
+
+    _install_stream(monkeypatch, make_stream)
+
+    assert await gemini.GeminiProvider().transcribe_pdf(b"%PDF") == ("Notes.", "stop")
+    assert [(e["call"], e["status"]) for e in logged] == [("transcribe", 429)]

@@ -13,7 +13,7 @@ It runs on Render's free tier, so the first request after a quiet period takes 3
 
 Most AI app tutorials fit in one file: call the model, print the answer. I wanted to understand how a production AI application is organised, so I built a small but complete one around five layers: **Client, Intelligence, Inference, Knowledge and Tools**. Each layer is its own Python package, dependencies only point one way, and a test fails if a layer imports something it shouldn't.
 
-The app itself is a study assistant. You can ask questions about a set of shared notes, upload your own notes (Markdown, text or PDF), save notes from the chat, and use tools such as a calculator and a web page reader. Every answer shows which layers did the work and how long each took, which kept the architecture visible while I was building it.
+The app itself is a study assistant. You can ask questions about a set of shared notes, upload your own notes (Markdown, text or PDF, including scanned PDFs, which Gemini transcribes), save notes from the chat, and use tools such as a calculator and a web page reader. Every answer shows which layers did the work and how long each took, which kept the architecture visible while I was building it.
 
 ## Features
 
@@ -205,7 +205,6 @@ Running a public demo on free tiers turned up problems I wouldn't have met in a 
 - Persistent storage (Postgres with pgvector, and Redis for sessions) so notes and conversations survive deploys and restarts
 - User accounts instead of anonymous session ids
 - Rate-limit counters shared between instances, so the app can run on more than one server
-- OCR for scanned PDFs, which currently have no text to index
 - The paid Gemini tier, whose terms don't let Google use uploaded notes to improve its products; the free tier's terms do
 - A Dockerfile, so it runs the same way anywhere
 

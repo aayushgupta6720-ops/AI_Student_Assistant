@@ -41,6 +41,14 @@ _PDF_LIMITS = dict.fromkeys(
     MAX_PDF_STREAM_BYTES,
 )
 ALLOWED_SUFFIXES = (".md", ".txt", ".pdf")
+# A PDF with no text layer (a scan) is read by the model instead: one request
+# from the shared daily quota, and it gets slower with every page.
+MAX_SCANNED_PAGES = 10
+_TRANSCRIBE_REFUSALS = {
+    "max_tokens": "That scanned PDF has more text than can be transcribed in one go. Split it into smaller files.",
+    "recitation": "Gemini wouldn't transcribe that PDF: it looked like published text it can't reproduce.",
+    "safety": "Gemini's safety filters blocked the transcription of that PDF.",
+}
 
 
 # The API's per-visitor chunk budget, for notes save_note stores: that runs
@@ -55,6 +63,14 @@ class UploadError(ValueError):
     """An upload we refuse, with a message fit to show the user."""
 
 
+class NoTextLayerError(UploadError):
+    """A PDF whose pages have no text to extract, as in a scan."""
+
+    def __init__(self, pages: int) -> None:
+        super().__init__("No text found in that PDF. Scanned PDFs without a text layer aren't supported.")
+        self.pages = pages
+
+
 class PrivateNotesFullError(UploadError):
     """The app holds as many private notes as it has memory for. Nothing is
     wrong with the upload; it can work once older notes expire."""
@@ -63,12 +79,15 @@ class PrivateNotesFullError(UploadError):
 def pdf_text(data: bytes, max_chars: int) -> str:
     """A PDF's text, page by page, stopping once there's more than max_chars
     of it: later pages aren't extracted at all. Used for uploads and for PDF
-    links fetch_url reads. Raises UploadError if there's no text to get."""
+    links fetch_url reads. Raises UploadError if there's no text to get:
+    NoTextLayerError if the pages simply have none."""
     pages: list[str] = []
-    length = skipped = parsed = 0
+    length = skipped = parsed = page_count = 0
     try:
         with apply_configuration(**_PDF_LIMITS):
-            for page in PdfReader(io.BytesIO(data)).pages:
+            reader = PdfReader(io.BytesIO(data))
+            page_count = len(reader.pages)
+            for page in reader.pages:
                 size = _content_size(page)
                 if size is None or size > MAX_PDF_PAGE_BYTES:
                     skipped += 1
@@ -90,7 +109,7 @@ def pdf_text(data: bytes, max_chars: int) -> str:
     if not text.strip():
         if skipped:
             raise UploadError("That PDF's pages are too complex to read: they're drawings rather than text.")
-        raise UploadError("No text found in that PDF. Scanned PDFs without a text layer aren't supported.")
+        raise NoTextLayerError(page_count)
     return text
 
 
@@ -154,6 +173,19 @@ def as_note(filename: str, text: str) -> tuple[str, str]:
     return slugify(stem), text
 
 
+def _own_notes(store: VectorStore, session_id: str, doc_id: str) -> dict[str, int]:
+    """The session's private notes (doc_id -> chunks), after refusing a new
+    note `doc_id` if the session already has as many as it may."""
+    store.purge_uploads(UPLOAD_TTL_S)
+    own = {d["doc_id"]: d["chunks"] for d in store.list_docs(owner=session_id) if d["uploaded"]}
+    if doc_id not in own and len(own) >= MAX_UPLOADS_PER_SESSION:
+        raise UploadError(
+            f"You can have up to {MAX_UPLOADS_PER_SESSION} private notes per chat "
+            "(uploads and saved notes); remove one first."
+        )
+    return own
+
+
 async def store_private_note(
     session_id: str | None,
     doc_id: str,
@@ -170,14 +202,7 @@ async def store_private_note(
     if not session_id:
         raise UploadError("Private notes need a session.")
 
-    store.purge_uploads(UPLOAD_TTL_S)
-    own = {d["doc_id"]: d["chunks"] for d in store.list_docs(owner=session_id) if d["uploaded"]}
-    if doc_id not in own and len(own) >= MAX_UPLOADS_PER_SESSION:
-        raise UploadError(
-            f"You can have up to {MAX_UPLOADS_PER_SESSION} private notes per chat "
-            "(uploads and saved notes); remove one first."
-        )
-
+    own = _own_notes(store, session_id, doc_id)
     chunks = chunk_note(text)
     # A visitor can start any number of sessions, so the per-session cap
     # doesn't bound memory; this one does. Replacing a note frees its chunks.
@@ -203,13 +228,56 @@ async def ingest_upload(
     store: VectorStore,
     provider: LLMProvider,
     charge: Callable[[int], None] | None = None,
+    charge_transcription: Callable[[], None] | None = None,
 ) -> dict:
     """Store an uploaded file as one of `session_id`'s private notes.
-    Re-uploading a file with the same name replaces the earlier version."""
+    Re-uploading a file with the same name replaces the earlier version. A
+    scanned PDF is transcribed by the model first; `charge_transcription` is
+    called just before, and may raise to refuse it (the API's daily limit)."""
     if not session_id:
         raise UploadError("Uploads need a session.")
-    # PDF parsing is CPU-bound: off the event loop, so other chats keep streaming.
-    text = await asyncio.to_thread(extract_text, filename, data)
-    doc_id, text = as_note(filename, text)
-    doc_id = clear_of_shared(store, doc_id)
-    return await store_private_note(session_id, doc_id, text, store, provider, charge)
+    doc_id = clear_of_shared(store, slugify(Path(filename).stem))
+    try:
+        # PDF parsing is CPU-bound: off the event loop, so other chats keep streaming.
+        text = await asyncio.to_thread(extract_text, filename, data)
+        transcribed = False
+    except NoTextLayerError as exc:
+        text = await _transcribe(session_id, doc_id, data, exc.pages, store, provider, charge_transcription)
+        transcribed = True
+    _, text = as_note(filename, text)
+    result = await store_private_note(session_id, doc_id, text, store, provider, charge)
+    return {**result, "transcribed": True} if transcribed else result
+
+
+async def _transcribe(
+    session_id: str,
+    doc_id: str,
+    data: bytes,
+    pages: int,
+    store: VectorStore,
+    provider: LLMProvider,
+    charge: Callable[[], None] | None,
+) -> str:
+    """A scanned PDF's text, read by the model. Everything that would refuse
+    the note anyway is checked first, so no model call is spent on it."""
+    if pages > MAX_SCANNED_PAGES:
+        raise UploadError(
+            f"That PDF is scanned (it has no text layer), and a scanned PDF can have up to "
+            f"{MAX_SCANNED_PAGES} pages; this one has {pages}. Split it into smaller files."
+        )
+    _own_notes(store, session_id, doc_id)
+    if store.private_count() >= get_settings().max_private_chunks:
+        raise PrivateNotesFullError(
+            "The assistant is holding as many private notes as it has room for. "
+            "Try again later, once older notes have expired."
+        )
+    if charge is not None:
+        charge()
+    with time_step("inference", "transcribe_pdf", pages=pages):
+        text, finish_reason = await provider.transcribe_pdf(data)
+    text = text.strip()
+    if finish_reason != "stop" or not text:
+        raise UploadError(_TRANSCRIBE_REFUSALS.get(finish_reason, "No text could be read from that scanned PDF."))
+    if len(text) > MAX_UPLOAD_CHARS:
+        raise UploadError(f"That PDF has over {MAX_UPLOAD_CHARS:,} characters of text. Split it into smaller files.")
+    return text

@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # to embed and keep in memory (a 200,000-character file is ~500).
     upload_chunk_limit_per_day: int = 1000
     ingest_limit_per_hour: int = 3
+    # A scanned PDF is one chat-model request (from the same 500 a day as
+    # every visitor's chats) to transcribe it, so scans get their own limit.
+    transcribe_limit_per_day: int = 5
     # Private chunks the whole app keeps, across every session. Search holds
     # them all in memory: 10,000 took the process from 86 MB to a 205 MB peak,
     # and a free instance has 512 MB.

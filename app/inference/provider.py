@@ -30,9 +30,9 @@ class QuotaExceededError(Exception):
 
 
 class LLMProvider(Protocol):
-    """The inference layer's contract. Two capabilities: generate (streamed,
-    with tool calling) and embed. Implementations: GeminiProvider (real),
-    FakeProvider (tests)."""
+    """The inference layer's contract. Three capabilities: generate (streamed,
+    with tool calling), embed, and transcribe a scanned PDF. Implementations:
+    GeminiProvider (real), FakeProvider (tests)."""
 
     def stream_generate(
         self,
@@ -43,3 +43,8 @@ class LLMProvider(Protocol):
     ) -> AsyncIterator[StreamEvent]: ...
 
     async def embed(self, texts: list[str], kind: EmbedKind) -> list[list[float]]: ...
+
+    async def transcribe_pdf(self, data: bytes) -> tuple[str, str]:
+        """A scanned PDF's text, and why the model stopped ("stop" when it
+        finished, or a StreamEnd finish_reason such as "max_tokens")."""
+        ...

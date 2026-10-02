@@ -78,7 +78,8 @@ class RateLimiter:
 def build_rate_limiters(settings: Settings) -> dict[str, RateLimiter]:
     """One limiter per costly endpoint: a chat turn is 2-3 model calls, and an
     upload or re-ingest is a few embedding calls. An upload's chunks count
-    too, since one file can be ~500 chunks to embed and keep in memory."""
+    too, since one file can be ~500 chunks to embed and keep in memory, and so
+    does a scanned PDF, which takes a chat-model call to transcribe."""
     return {
         "chat": RateLimiter("messages", [
             Limit(settings.chat_limit_per_minute, 60, "a minute"),
@@ -87,6 +88,7 @@ def build_rate_limiters(settings: Settings) -> dict[str, RateLimiter]:
         "upload": RateLimiter("uploads", [Limit(settings.upload_limit_per_hour, 3600, "an hour")]),
         "upload_chunks": RateLimiter("note chunks", [Limit(settings.upload_chunk_limit_per_day, 24 * 3600, "a day")]),
         "ingest": RateLimiter("re-ingests", [Limit(settings.ingest_limit_per_hour, 3600, "an hour")]),
+        "transcribe": RateLimiter("scanned PDFs", [Limit(settings.transcribe_limit_per_day, 24 * 3600, "a day")]),
     }
 
 
