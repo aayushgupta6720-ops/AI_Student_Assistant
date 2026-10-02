@@ -239,7 +239,8 @@ async def ingest_upload(
     doc_id = clear_of_shared(store, slugify(Path(filename).stem))
     try:
         # PDF parsing is CPU-bound: off the event loop, so other chats keep streaming.
-        text = await asyncio.to_thread(extract_text, filename, data)
+        with time_step("knowledge", "extract_text"):
+            text = await asyncio.to_thread(extract_text, filename, data)
         transcribed = False
     except NoTextLayerError as exc:
         text = await _transcribe(session_id, doc_id, data, exc.pages, store, provider, charge_transcription)

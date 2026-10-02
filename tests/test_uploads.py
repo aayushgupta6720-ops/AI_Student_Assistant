@@ -488,3 +488,40 @@ async def test_scanned_pdfs_have_their_own_daily_limit(api, monkeypatch):
     assert first.json() == {"doc_id": "scan1", "chunks": 1, "transcribed": True}
     assert second.status_code == 429 and "1 scanned PDFs a day" in second.json()["detail"]
     assert (await _upload(api, "alice", "typed.md", b"Typed notes.")).status_code == 200  # other uploads unaffected
+
+
+async def test_an_uploads_log_line_says_how_long_each_step_took(api, monkeypatch):
+    # The first live scanned upload took 13 s against 3 s locally, and its log
+    # couldn't say whether transcribing or embedding was the slow part.
+    import app.api.routes as routes
+
+    logged = []
+    monkeypatch.setattr(routes, "log_event", lambda **fields: logged.append(fields))
+    monkeypatch.setattr(get_settings(), "log_chat_text", False)
+    main.app.state.provider.transcription = "Scanned notes."
+
+    await _upload(api, "alice", "bank-pin-4321.pdf", _scan())
+
+    [line] = [f for f in logged if f["event"] == "note_uploaded"]
+    assert [s["name"] for s in line["steps"]] == ["extract_text", "transcribe_pdf", "embed_documents", "store_upsert"]
+    assert line["latency_ms"] > 0 and set(line["per_layer_ms"]) == {"knowledge", "inference"}
+    assert "bank-pin-4321" not in json.dumps(line)  # a private note's name is its file name
+    assert line["steps"][2]["meta"] == {"doc_id": "<13 chars>", "chunks": 1}
+
+
+async def test_a_failed_uploads_log_line_has_its_timings_too(api, monkeypatch):
+    import app.api.routes as routes
+    from app.inference.provider import ModelTimeoutError
+
+    logged = []
+    monkeypatch.setattr(routes, "log_event", lambda **fields: logged.append(fields))
+
+    async def stalled(data):
+        raise ModelTimeoutError("no response from Gemini within 60s")
+
+    monkeypatch.setattr(main.app.state.provider, "transcribe_pdf", stalled)
+
+    r = await _upload(api, "alice", "scan.pdf", _scan())
+
+    [line] = [f for f in logged if f["event"] == "upload_failed"]
+    assert r.status_code == 503 and [s["name"] for s in line["steps"]] == ["extract_text", "transcribe_pdf"]

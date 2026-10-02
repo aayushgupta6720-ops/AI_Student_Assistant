@@ -31,7 +31,7 @@ from app.knowledge.uploads import (
     ingest_upload,
     note_charge,
 )
-from app.observability import log_event
+from app.observability import CallTrace, log_event, start_trace
 
 router = APIRouter()
 
@@ -90,6 +90,16 @@ def _loggable_sources(request: Request, sources: list[str]) -> list[str]:
     return [s if s in shared else "<private>" for s in sources]
 
 
+def _timings(trace: CallTrace, started: float) -> dict:
+    """How long a request took, in all and step by step, for its log line.
+    Steps' details go through _loggable: an upload's doc_id is its file name."""
+    return {
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        "per_layer_ms": trace.per_layer_ms(),
+        "steps": [{**s, "meta": _loggable(s["meta"])} for s in trace.as_dicts()],
+    }
+
+
 def _preview(result: dict, limit: int = 300) -> dict:
     """Trim tool results for the wire; the model still gets the full thing."""
     text = json.dumps(result, default=str)
@@ -123,6 +133,8 @@ async def upload_note(
 ) -> dict:
     """Add a .md/.txt/.pdf note that only this session's searches can see."""
     data = await file.read(MAX_UPLOAD_BYTES + 1)  # one byte over is enough to refuse it
+    # Traced like a chat turn, so a slow upload's log says which step was slow.
+    trace, started = start_trace(), time.perf_counter()
     try:
         result = await ingest_upload(
             session_id,
@@ -140,12 +152,12 @@ async def upload_note(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (QuotaExceededError, ModelOverloadedError, ModelTimeoutError) as exc:
         # Uploading embeds the note (and reads a scanned PDF), so it fails when the model provider does.
-        log_event(event="upload_failed", session_id=session_id, error=str(exc))
+        log_event(event="upload_failed", session_id=session_id, error=str(exc), **_timings(trace, started))
         raise HTTPException(
             status_code=503, detail="The model is unavailable right now, so the note couldn't be read and indexed. Try again later."
         ) from exc
     log_event(event="note_uploaded", session_id=session_id, doc_id=_loggable(result["doc_id"]), chunks=result["chunks"],
-              transcribed=result.get("transcribed", False))
+              transcribed=result.get("transcribed", False), **_timings(trace, started))
     return result
 
 

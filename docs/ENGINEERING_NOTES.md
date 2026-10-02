@@ -37,6 +37,8 @@ Every layer wraps its work in `time_step(layer, name)` (`app/observability.py`).
 
 `latency_ms` is inclusive and `self_ms` excludes nested steps, so the per-layer totals don't double-count (`tools.search_notes` wraps `inference.embed_query`).
 
+Uploads are traced the same way. `note_uploaded`, and `upload_failed` when the model provider fails, carry `latency_ms`, `per_layer_ms` and `steps`: `extract_text`, then `transcribe_pdf` for a scanned PDF, `embed_documents` and `store_upsert`. The note's id, which is its file name, appears only as a length.
+
 A `generate` or `embed_query` step includes any time spent waiting to retry a 429 or 503, so each retry is logged on its own line, just before that turn's `chat_call`:
 
 ```json
