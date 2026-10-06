@@ -4,3 +4,4 @@ __pycache__/
 data/knowledge.sqlite
 .pytest_cache/
 .DS_Store
+.claude/
