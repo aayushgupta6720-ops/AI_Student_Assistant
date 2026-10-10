@@ -559,3 +559,61 @@ async def test_a_failed_uploads_log_line_has_its_timings_too(api, monkeypatch):
 
     [line] = [f for f in logged if f["event"] == "upload_failed"]
     assert r.status_code == 503 and [s["name"] for s in line["steps"]] == ["extract_text", "transcribe_pdf"]
+
+
+def _mixed_pdf(cover: str, scanned_page_number: str | None = "2") -> bytes:
+    """Page 1 typed; page 2 an image (a scan) with at most a typed page number
+    on it. scanned_page_number=None makes page 2 a typed-but-empty page instead."""
+    cover_stream = b"BT /F1 12 Tf 72 720 Td (" + cover.encode() + b") Tj ET"
+    if scanned_page_number is None:
+        scan_stream, scan_resources = b"", b"<< /Font << /F1 7 0 R >> >>"
+    else:
+        scan_stream = b"q 500 0 0 700 50 50 cm /Im1 Do Q BT /F1 9 Tf 300 20 Td (" + scanned_page_number.encode() + b") Tj ET"
+        scan_resources = b"<< /Font << /F1 7 0 R >> /XObject << /Im1 8 0 R >> >>"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources " + scan_resources + b" /Contents 6 0 R >>",
+        b"<< /Length %d >>\nstream\n" % len(cover_stream) + cover_stream + b"\nendstream",
+        b"<< /Length %d >>\nstream\n" % len(scan_stream) + scan_stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\n\x80\nendstream",
+    ]
+    out, offsets = b"%PDF-1.4\n", []
+    for i, obj in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + obj + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return out
+
+
+COVER = "Lecture 7: Enzymes and how they lower activation energy"
+
+
+async def test_only_the_scanned_pages_of_a_mixed_pdf_are_transcribed(store):
+    # A scan with a typed cover used to upload "successfully" as just its cover.
+    from pypdf import PdfReader
+
+    provider = FakeProvider(turns=[], transcription="Competitive inhibitors bind the active site.")
+    charged = []
+
+    result = await ingest_upload("alice", "lecture-7.pdf", _mixed_pdf(COVER), store, provider,
+                                 charge_transcription=lambda: charged.append(1))
+
+    assert result["transcribed"] is True and charged == [1]
+    [sent] = provider.transcribed
+    assert len(PdfReader(io.BytesIO(sent)).pages) == 1  # just the scanned page, not the cover
+    note = store.note_text("lecture-7", owner="alice")
+    assert note.index(COVER) < note.index("Competitive inhibitors bind the active site.")
+
+
+async def test_a_typed_pdf_with_an_empty_page_costs_no_transcription(store):
+    provider = FakeProvider(turns=[], transcription="should not be asked for")
+
+    result = await ingest_upload("alice", "notes.pdf", _mixed_pdf(COVER, scanned_page_number=None), store, provider)
+
+    assert "transcribed" not in result and provider.transcribed == []

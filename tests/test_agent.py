@@ -327,3 +327,23 @@ async def test_a_turn_with_no_answer_leaves_no_question_behind(ending):
     await _collect(agent, "s", "What's the capital of France?")
 
     assert [(m.role, m.text()) for m in provider.seen[1]] == [("user", "What's the capital of France?")]
+
+
+async def test_tools_run_in_parallel_count_once_in_the_timing():
+    # Six 50 ms tools in parallel took 50 ms, but the bar used to say 300 ms of tools.
+    reg = ToolRegistry()
+
+    async def slow(n):
+        await asyncio.sleep(0.05)
+        return {"n": n}
+
+    reg.register(Tool("slow", "wait", {"type": "object"}, slow))
+    provider = FakeProvider([
+        [ToolCall(f"c{i}", "slow", {"n": i}) for i in range(6)],
+        text_turn("done"),
+    ])
+    done = (await _collect(Agent(provider, reg, SessionStore()), "s", "go"))[-1]
+
+    tools_ms = done.trace.per_layer_ms()["tools"]
+    assert 45 <= tools_ms < 100, tools_ms
+    assert sum(s.self_ms for s in done.trace.steps if s.layer == "tools") >= 290  # each tool's own time, still kept

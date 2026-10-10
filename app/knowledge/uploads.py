@@ -44,6 +44,10 @@ ALLOWED_SUFFIXES = (".md", ".txt", ".pdf")
 # A PDF with no text layer (a scan) is read by the model instead: one request
 # from the shared daily quota, and it gets slower with every page.
 MAX_SCANNED_PAGES = 10
+# A scanned page can still carry a little text, such as a typed page number or
+# header. A page with an image and less text than this counts as scanned, so a
+# scan with a typed cover isn't indexed as just its cover.
+MIN_PAGE_CHARS = 40
 _TRANSCRIBE_REFUSALS = {
     "max_tokens": "That scanned PDF has more text than can be transcribed in one go. Split it into smaller files.",
     "recitation": "Gemini wouldn't transcribe that PDF: it looked like published text it can't reproduce.",
@@ -71,23 +75,34 @@ class NoTextLayerError(UploadError):
         self.pages = pages
 
 
+class PartlyScannedError(UploadError):
+    """A PDF with typed pages and scanned ones: `pages` is each read page's
+    (index, text), `scanned` the indexes of the scanned ones."""
+
+    def __init__(self, pages: list[tuple[int, str]], scanned: list[int]) -> None:
+        super().__init__("Some of that PDF's pages are scanned.")
+        self.pages, self.scanned = pages, scanned
+
+
 class PrivateNotesFullError(UploadError):
     """The app holds as many private notes as it has memory for. Nothing is
     wrong with the upload; it can work once older notes expire."""
 
 
-def pdf_text(data: bytes, max_chars: int) -> str:
+def pdf_text(data: bytes, max_chars: int, find_scans: bool = False) -> str:
     """A PDF's text, page by page, stopping once there's more than max_chars
     of it: later pages aren't extracted at all. Used for uploads and for PDF
     links fetch_url reads. Raises UploadError if there's no text to get:
-    NoTextLayerError if the pages simply have none."""
+    NoTextLayerError if the pages simply have none. With find_scans, a PDF
+    with typed pages and scanned ones raises PartlyScannedError."""
     pages: list[str] = []
+    read: list[tuple[int, str, bool]] = []  # (index, text, has an image)
     length = skipped = parsed = page_count = 0
     try:
         with apply_configuration(**_PDF_LIMITS):
             reader = PdfReader(io.BytesIO(data))
             page_count = len(reader.pages)
-            for page in reader.pages:
+            for index, page in enumerate(reader.pages):
                 size = _content_size(page)
                 if size is None or size > MAX_PDF_PAGE_BYTES:
                     skipped += 1
@@ -96,6 +111,7 @@ def pdf_text(data: bytes, max_chars: int) -> str:
                 if parsed > MAX_PDF_TOTAL_BYTES:
                     raise UploadError("That PDF has too many detailed pages to read. Split it into smaller files.")
                 pages.append((page.extract_text() or "").strip())
+                read.append((index, pages[-1], find_scans and _has_image(page)))
                 length += len(pages[-1])
                 if length > max_chars:
                     break  # already enough; don't extract the rest
@@ -110,7 +126,35 @@ def pdf_text(data: bytes, max_chars: int) -> str:
         if skipped:
             raise UploadError("That PDF's pages are too complex to read: they're drawings rather than text.")
         raise NoTextLayerError(page_count)
+    scanned = [index for index, page_text, image in read if image and len(page_text) < MIN_PAGE_CHARS]
+    if scanned:
+        raise PartlyScannedError([(index, page_text) for index, page_text, _ in read], scanned)
     return text
+
+
+def _has_image(page: PageObject) -> bool:
+    """Whether the page draws an image (a scan is one big one)."""
+    try:
+        xobjects = page["/Resources"].get_object().get("/XObject")
+        return xobjects is not None and any(
+            x.get_object().get("/Subtype") == "/Image" for x in xobjects.get_object().values()
+        )
+    except Exception:  # noqa: BLE001 - a malformed resource dictionary just isn't an image
+        return False
+
+
+def pdf_pages(data: bytes, indexes: list[int]) -> bytes:
+    """A PDF of just the given pages of `data`."""
+    from pypdf import PdfWriter
+
+    with apply_configuration(**_PDF_LIMITS):
+        reader = PdfReader(io.BytesIO(data))
+        writer = PdfWriter()
+        for index in indexes:
+            writer.add_page(reader.pages[index])
+        out = io.BytesIO()
+        writer.write(out)
+    return out.getvalue()
 
 
 def _content_size(page: PageObject) -> int | None:
@@ -131,7 +175,7 @@ def extract_text(filename: str, data: bytes) -> str:
         raise UploadError(f"That file is over the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.")
 
     if suffix == ".pdf":
-        text = pdf_text(data, MAX_UPLOAD_CHARS)
+        text = pdf_text(data, MAX_UPLOAD_CHARS, find_scans=True)
     else:
         try:
             # utf-8-sig drops a byte-order mark, which hid a note's own "# Title".
@@ -245,6 +289,22 @@ async def ingest_upload(
     except NoTextLayerError as exc:
         text = await _transcribe(session_id, doc_id, data, exc.pages, store, provider, charge_transcription)
         transcribed = True
+    except PartlyScannedError as exc:
+        # Only the scanned pages go to the model; its text takes the place of
+        # the first of them, and the typed pages keep their own.
+        scans = await asyncio.to_thread(pdf_pages, data, exc.scanned)
+        read = await _transcribe(session_id, doc_id, scans, len(exc.scanned), store, provider,
+                                 charge_transcription, allow_empty=True)
+        parts, placed = [], False
+        for index, page_text in exc.pages:
+            if index in exc.scanned:
+                if not placed and read:
+                    parts.append(read)
+                placed = True
+            elif page_text:
+                parts.append(page_text)
+        text = "\n\n".join(parts)
+        transcribed = True
     _, text = as_note(filename, text)
     result = await store_private_note(session_id, doc_id, text, store, provider, charge)
     return {**result, "transcribed": True} if transcribed else result
@@ -258,9 +318,11 @@ async def _transcribe(
     store: VectorStore,
     provider: LLMProvider,
     charge: Callable[[], None] | None,
+    allow_empty: bool = False,
 ) -> str:
     """A scanned PDF's text, read by the model. Everything that would refuse
-    the note anyway is checked first, so no model call is spent on it."""
+    the note anyway is checked first, so no model call is spent on it. With
+    allow_empty (some of the pages were typed), reading nothing isn't an error."""
     if pages > MAX_SCANNED_PAGES:
         raise UploadError(
             f"That PDF is scanned (it has no text layer), and a scanned PDF can have up to "
@@ -277,7 +339,7 @@ async def _transcribe(
     with time_step("inference", "transcribe_pdf", pages=pages):
         text, finish_reason = await provider.transcribe_pdf(data)
     text = text.strip()
-    if finish_reason != "stop" or not text:
+    if finish_reason != "stop" or not (text or allow_empty):
         raise UploadError(_TRANSCRIBE_REFUSALS.get(finish_reason, "No text could be read from that scanned PDF."))
     if len(text) > MAX_UPLOAD_CHARS:
         raise UploadError(f"That PDF has over {MAX_UPLOAD_CHARS:,} characters of text. Split it into smaller files.")

@@ -217,6 +217,7 @@ async def chat(body: ChatRequest, request: Request, session: str = Depends(visit
 
     async def stream():
         started = time.perf_counter()
+        first_token_ms = None  # how long the visitor waited for the first word
         note_charge.set(charge_saved_notes)  # for save_note, like the agent's current_session
         try:
             async for ev in agent.run_turn(session, body.message, timezone=body.timezone,
@@ -228,6 +229,8 @@ async def chat(body: ChatRequest, request: Request, session: str = Depends(visit
                 elif isinstance(ev, AgentToolResult):
                     yield _sse("tool_result", {"id": ev.id, "name": ev.name, "is_error": ev.is_error, **_preview(ev.result)})
                 elif isinstance(ev, AgentToken):
+                    if first_token_ms is None:
+                        first_token_ms = round((time.perf_counter() - started) * 1000, 2)
                     yield _sse("token", {"text": ev.text})
                 elif isinstance(ev, AgentDone):
                     payload = {
@@ -238,6 +241,8 @@ async def chat(body: ChatRequest, request: Request, session: str = Depends(visit
                         "tools_used": ev.tools_used,
                         "prompt_version": ev.prompt_version,
                         "per_layer_ms": ev.trace.per_layer_ms(),
+                        "total_ms": round((time.perf_counter() - started) * 1000, 2),
+                        "first_token_ms": first_token_ms,
                         "total_tokens": ev.trace.total_tokens,
                         "finish_reason": ev.finish_reason,
                         "notice": ev.notice,

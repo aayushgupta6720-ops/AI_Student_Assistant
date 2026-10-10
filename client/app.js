@@ -123,7 +123,8 @@ const handlers = {
     v.footer.innerHTML =
       (d.sources.length ? `<div class="chips">retrieved: ${sourceChips(d)}</div><div class="passage" hidden></div>` : "") +
       `<div class="bar">${bar}</div><div class="barlegend">${legend}</div>` +
-      `<div>${d.iterations} model call(s) · ${d.total_tokens} tokens · tools: ${d.tools_used.length ? d.tools_used.map(esc).join(", ") : "none"}</div>`;
+      `<div>${(d.total_ms / 1000).toFixed(1)} s in all${d.first_token_ms != null ? `, first word after ${(d.first_token_ms / 1000).toFixed(1)} s` : ""} · ` +
+      `${d.iterations} model call(s) · ${d.total_tokens} tokens · tools: ${d.tools_used.length ? d.tools_used.map(esc).join(", ") : "none"}</div>`;
     if (d.tools_used.includes("save_note")) loadSidebar();
     announce(v.answer.textContent);
   },

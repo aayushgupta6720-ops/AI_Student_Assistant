@@ -74,7 +74,7 @@ The app itself is a study assistant. You can ask questions about a set of shared
 | **Knowledge** | Chunk, embed, store and retrieve notes | inference (for embeddings) | intelligence, tools |
 | **Tools** | A registry of functions the model can call | knowledge (for `search_notes`) | intelligence |
 
-The dependency rule is enforced by `tests/test_layering.py`: only `app/inference/` may import the Gemini SDK, and lower layers never import upward. `app/main.py` is the one file that sees all five layers and wires them together.
+The dependency rule is enforced by `tests/test_layering.py`, on the import graph rather than on text: it parses every module, resolves relative imports and `importlib` calls, and checks each import against this table, so only `app/inference/` may import the Gemini SDK and no layer imports one it shouldn't. `app/main.py` is the one file that sees all five layers and wires them together.
 
 ### One request, step by step
 

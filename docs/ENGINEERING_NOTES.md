@@ -35,7 +35,7 @@ Every layer wraps its work in `time_step(layer, name)` (`app/observability.py`).
            {"layer": "tools", "name": "search_notes", "meta": {"args": {"query": "<12 chars>"}}, ..., "depth": 1}, ...]}
 ```
 
-`latency_ms` is inclusive and `self_ms` excludes nested steps, so the per-layer totals don't double-count (`tools.search_notes` wraps `inference.embed_query`).
+`latency_ms` is inclusive and `self_ms` excludes nested steps, so the per-layer totals don't double-count (`tools.search_notes` wraps `inference.embed_query`). Each layer's bar is the time its steps covered outside their nested steps, with overlapping time counted once: tools run in parallel, and adding up their times showed six 0.5 s tools as 3 s of tools in a 0.5 s turn. The `done` event also carries `total_ms` and `first_token_ms`, shown under the bar.
 
 Uploads are traced the same way. `note_uploaded`, and `upload_failed` when the model provider fails, carry `latency_ms`, `per_layer_ms` and `steps`: `extract_text`, then `transcribe_pdf` for a scanned PDF, `embed_documents` and `store_upsert`. The note's id, which is its file name, appears only as a length.
 
@@ -92,7 +92,7 @@ That PDF is now refused in under 0.1 s. The worst variant tested, 40 pages each 
 - A scan can have at most 10 pages, and each visitor can upload 5 a day.
 - Everything that would refuse the note anyway (too many pages, the session's 10 notes, the server's private-chunk cap) is checked before the request, so none is spent on a note that can't be stored.
 - A transcription that didn't finish isn't stored half-done. When Gemini stops early, the upload is refused with the reason: the text was too long, it was blocked, or it looked like published text Gemini won't reproduce (a scanned textbook page can be).
-- A PDF with some typed and some scanned pages only has its typed text indexed, since it does have a text layer.
+- A PDF with some typed and some scanned pages has just its scanned ones transcribed. A page counts as scanned when it draws an image and has under 40 characters of text, so a typed page number or header on a scan doesn't hide it, and a typed PDF with an empty page doesn't spend a request. The scanned pages are copied into a smaller PDF for the model, and the transcription takes the place of the first of them. Before, such a PDF uploaded "successfully" with only its typed text.
 
 `fetch_url` still refuses a scanned PDF link: transcribing it would spend a request on every link the model follows.
 
