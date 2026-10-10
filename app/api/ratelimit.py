@@ -3,8 +3,10 @@ the shared daily Gemini quota for everyone. A visitor is an IP address (for
 IPv6, its /64, since one visitor usually holds all 2^64 of those).
 
 Counts live in memory: right for a single instance (Render's free plan runs
-one), and they reset on restart. Several instances would need a shared
-store such as Redis."""
+one), and they reset on restart, including the free plan's spin-down after
+about 15 idle minutes. A visitor using the app keeps it awake, so a day's
+limits hold while they matter; a shared store such as Redis would keep them
+across restarts and instances."""
 
 import ipaddress
 import math
@@ -76,14 +78,21 @@ class RateLimiter:
 
 
 def build_rate_limiters(settings: Settings) -> dict[str, RateLimiter]:
-    """One limiter per costly endpoint: a chat turn is 2-3 model calls, and an
-    upload or re-ingest is a few embedding calls. An upload's chunks count
-    too, since one file can be ~500 chunks to embed and keep in memory, and so
-    does a scanned PDF, which takes a chat-model call to transcribe."""
+    """One limiter per costly endpoint. A chat message counts once, and each
+    model call it makes counts again (one message can take up to six), per
+    visitor and across all of them (key ALL), since every visitor shares one
+    daily quota. An upload or re-ingest is a few embedding calls. An upload's
+    chunks count too, since one file can be ~500 chunks to embed and keep in
+    memory, and so does a scanned PDF, which takes a chat-model call to
+    transcribe."""
     return {
         "chat": RateLimiter("messages", [
             Limit(settings.chat_limit_per_minute, 60, "a minute"),
             Limit(settings.chat_limit_per_day, 24 * 3600, "a day"),
+        ]),
+        "model_calls": RateLimiter("model calls", [Limit(settings.chat_model_calls_per_day, 24 * 3600, "a day")]),
+        "model_calls_all": RateLimiter("model calls for everyone", [
+            Limit(settings.chat_model_calls_per_day_all, 24 * 3600, "a day"),
         ]),
         "upload": RateLimiter("uploads", [Limit(settings.upload_limit_per_hour, 3600, "an hour")]),
         "upload_chunks": RateLimiter("note chunks", [Limit(settings.upload_chunk_limit_per_day, 24 * 3600, "a day")]),
@@ -134,11 +143,14 @@ def _duration(seconds: int) -> str:
     return f"{n} {unit}{'' if n == 1 else 's'}"
 
 
-def charge(request: Request, name: str, cost: int = 1) -> None:
-    """Count `cost` against this visitor's `name` limits, or refuse the
-    request with a 429 if that would take them over one."""
+ALL = "everyone"  # the key for limits shared by every visitor
+
+
+def charge(request: Request, name: str, cost: int = 1, key: str | None = None) -> None:
+    """Count `cost` against this visitor's `name` limits (or `key`'s, e.g.
+    ALL), or refuse the request with a 429 if that would take them over one."""
     limiter: RateLimiter = request.app.state.rate_limiters[name]
-    key = client_key(request)
+    key = key or client_key(request)
     refused = limiter.hit(key, cost)
     if refused is None:
         return

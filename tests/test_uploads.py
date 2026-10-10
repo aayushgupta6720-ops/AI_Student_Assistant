@@ -278,89 +278,123 @@ async def test_expired_uploads_stop_showing_up_without_waiting_for_another_uploa
 
 
 @pytest.fixture
-async def api(store, monkeypatch):
+async def visitors(store, monkeypatch):
+    """A client per visitor, each with its own cookie jar as a browser has: the
+    server issues each one a session the first time it calls."""
     state = {"store": store, "provider": FakeProvider(turns=[]), "memory": SessionStore(),
              "rate_limiters": build_rate_limiters(get_settings())}
     for name, value in state.items():
         monkeypatch.setattr(main.app.state, name, value, raising=False)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
-        yield client
+    clients: dict[str, httpx.AsyncClient] = {}
+
+    def visitor(name: str) -> httpx.AsyncClient:
+        if name not in clients:
+            clients[name] = httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test")
+        return clients[name]
+
+    yield visitor
+    for client in clients.values():
+        await client.aclose()
 
 
-async def test_upload_list_delete_and_reset_through_the_api(api):
-    r = await api.post("/notes/upload", data={"session_id": "alice"}, files={"file": ("cells.md", b"Mitochondria.")})
+@pytest.fixture
+async def api(visitors):
+    return visitors("alice")
+
+
+async def test_upload_list_delete_and_reset_through_the_api(visitors):
+    alice, bob = visitors("alice"), visitors("bob")
+    r = await alice.post("/notes/upload", files={"file": ("cells.md", b"Mitochondria.")})
     assert r.status_code == 200 and r.json() == {"doc_id": "cells", "chunks": 1}
-    await api.post("/notes/upload", data={"session_id": "alice"}, files={"file": ("dna.pdf", _pdf("DNA is a double helix"))})
+    await alice.post("/notes/upload", files={"file": ("dna.pdf", _pdf("DNA is a double helix"))})
 
-    alice = (await api.get("/notes", params={"session_id": "alice"})).json()["docs"]
-    assert [(d["doc_id"], d["uploaded"]) for d in alice] == [("shared-note", False), ("cells", True), ("dna", True)]
-    bob = (await api.get("/notes", params={"session_id": "bob"})).json()["docs"]
-    assert [d["doc_id"] for d in bob] == ["shared-note"]
+    docs = (await alice.get("/notes")).json()["docs"]
+    assert [(d["doc_id"], d["uploaded"]) for d in docs] == [("shared-note", False), ("cells", True), ("dna", True)]
+    assert [d["doc_id"] for d in (await bob.get("/notes")).json()["docs"]] == ["shared-note"]
+    assert (await bob.delete("/notes/cells")).json() == {"deleted": False}  # not bob's to delete
 
-    assert (await api.delete("/notes/shared-note", params={"session_id": "alice"})).json() == {"deleted": False}
-    assert (await api.delete("/notes/cells", params={"session_id": "alice"})).json() == {"deleted": True}
+    assert (await alice.delete("/notes/shared-note")).json() == {"deleted": False}
+    assert (await alice.delete("/notes/cells")).json() == {"deleted": True}
 
-    await api.post("/reset/alice", params={"keep_uploads": "true"})  # page reload: uploads stay
-    assert len((await api.get("/notes", params={"session_id": "alice"})).json()["docs"]) == 2
-    await api.post("/reset/alice")  # New session: uploads go
-    assert len((await api.get("/notes", params={"session_id": "alice"})).json()["docs"]) == 1
+    await alice.post("/reset", params={"keep_uploads": "true"})  # page reload: uploads stay
+    assert len((await alice.get("/notes")).json()["docs"]) == 2
+    await alice.post("/reset")  # New session: uploads go
+    assert len((await alice.get("/notes")).json()["docs"]) == 1
+
+
+async def test_a_session_is_issued_by_the_server_not_chosen_by_the_client(visitors):
+    alice = visitors("alice")
+    first = await alice.get("/notes")
+    cookie = first.headers["set-cookie"]
+    assert cookie.startswith("sid=") and "HttpOnly" in cookie and "SameSite=Strict" in cookie
+    assert "set-cookie" not in (await alice.get("/notes")).headers  # kept, not reissued
+
+    # An id the client makes up (the README's curl example once used "cli") is replaced.
+    chosen = httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test",
+                               cookies={"sid": "cli"})
+    async with chosen:
+        r = await chosen.get("/notes")
+    issued = r.headers["set-cookie"].split(";")[0].removeprefix("sid=")
+    assert issued != "cli" and len(issued) == 32
 
 
 async def test_the_notes_list_drops_expired_uploads(api, monkeypatch):
-    await api.post("/notes/upload", data={"session_id": "alice"}, files={"file": ("cells.md", b"Mitochondria.")})
+    await api.post("/notes/upload", files={"file": ("cells.md", b"Mitochondria.")})
     later = time.time() + UPLOAD_TTL_S + 60
     monkeypatch.setattr(time, "time", lambda: later)
 
-    docs = (await api.get("/notes", params={"session_id": "alice"})).json()["docs"]
+    docs = (await api.get("/notes")).json()["docs"]
     assert [d["doc_id"] for d in docs] == ["shared-note"]
 
 
 TWO_CHUNKS = (("a " * 300).strip() + "\n\n" + ("b " * 300).strip()).encode()
 
 
-async def _upload(api, session: str, name: str, data: bytes) -> httpx.Response:
-    return await api.post("/notes/upload", data={"session_id": session}, files={"file": (name, data)})
+async def _upload(client: httpx.AsyncClient, name: str, data: bytes) -> httpx.Response:
+    return await client.post("/notes/upload", files={"file": (name, data)})
 
 
-async def test_uploads_count_their_chunks_against_a_daily_budget(api, monkeypatch):
+async def test_uploads_count_their_chunks_against_a_daily_budget(visitors, monkeypatch):
     # Counting files alone let one visitor, switching sessions, upload ~500
-    # chunks at a time all day: more memory than a free instance has.
+    # chunks at a time all day: more memory than a free instance has. The
+    # budget is per visitor (IP), so a fresh session doesn't reset it.
     settings = get_settings()
     monkeypatch.setattr(settings, "upload_chunk_limit_per_day", 3)
     monkeypatch.setattr(main.app.state, "rate_limiters", build_rate_limiters(settings))
 
-    assert (await _upload(api, "alice", "big.md", TWO_CHUNKS)).json() == {"doc_id": "big", "chunks": 2}
-    refused = await _upload(api, "new-session", "big2.md", TWO_CHUNKS)
+    assert (await _upload(visitors("first tab"), "big.md", TWO_CHUNKS)).json() == {"doc_id": "big", "chunks": 2}
+    fresh = visitors("new session, same visitor")
+    refused = await _upload(fresh, "big2.md", TWO_CHUNKS)
 
     assert refused.status_code == 429 and int(refused.headers["Retry-After"]) == 24 * 3600
     assert refused.json()["detail"] == (
         "That's 2 note chunks, which would take you over the limit of 3 note chunks a day. Try again in 24 hours."
     )
-    assert [d["doc_id"] for d in (await api.get("/notes", params={"session_id": "new-session"})).json()["docs"]] == [
+    assert [d["doc_id"] for d in (await fresh.get("/notes")).json()["docs"]] == [
         "shared-note"
     ]  # refused before anything was embedded or stored
-    assert (await _upload(api, "new-session", "small.md", b"tiny")).status_code == 200  # 1 more still fits
+    assert (await _upload(fresh, "small.md", b"tiny")).status_code == 200  # 1 more still fits
 
 
-async def test_private_notes_stop_at_the_apps_memory_cap_across_all_sessions(api, monkeypatch):
+async def test_private_notes_stop_at_the_apps_memory_cap_across_all_sessions(visitors, monkeypatch):
     monkeypatch.setattr(get_settings(), "max_private_chunks", 3)
-    assert (await _upload(api, "alice", "big.md", TWO_CHUNKS)).status_code == 200
-    assert (await _upload(api, "bob", "small.md", b"tiny")).status_code == 200
+    assert (await _upload(visitors("alice"), "big.md", TWO_CHUNKS)).status_code == 200
+    assert (await _upload(visitors("bob"), "small.md", b"tiny")).status_code == 200
 
-    full = await _upload(api, "carol", "small.md", b"tiny")
+    full = await _upload(visitors("carol"), "small.md", b"tiny")
 
     assert full.status_code == 503 and "as many private notes as it has room for" in full.json()["detail"]
-    assert (await _upload(api, "alice", "big.md", b"now one chunk")).status_code == 200  # replacing frees its chunks
+    assert (await _upload(visitors("alice"), "big.md", b"now one chunk")).status_code == 200  # replacing frees its chunks
 
 
 async def test_upload_errors_come_back_as_400_with_the_reason(api):
-    r = await api.post("/notes/upload", data={"session_id": "alice"}, files={"file": ("x.exe", b"MZ")})
+    r = await api.post("/notes/upload", files={"file": ("x.exe", b"MZ")})
 
     assert r.status_code == 400
     assert "Only .md, .txt, .pdf" in r.json()["detail"]
 
 
-async def test_notes_saved_from_chat_count_against_the_daily_chunk_budget(api, store, monkeypatch):
+async def test_notes_saved_from_chat_count_against_the_daily_chunk_budget(visitors, store, monkeypatch):
     # save_note didn't charge the budget, so chat alone could fill the
     # server-wide private-chunk cap and lock everyone's uploads out.
     settings = get_settings()
@@ -375,7 +409,7 @@ async def test_notes_saved_from_chat_count_against_the_daily_chunk_budget(api, s
                         raising=False)
 
     async def saved(session):
-        r = await api.post("/chat", json={"session_id": session, "message": "save my essay"})
+        r = await visitors(session).post("/chat", json={"message": "save my essay"})
         [result] = [json.loads(block.split("data: ", 1)[1]) for block in r.text.split("\n\n")
                     if block.startswith("event: tool_result")]
         return result
@@ -384,7 +418,7 @@ async def test_notes_saved_from_chat_count_against_the_daily_chunk_budget(api, s
     refused = await saved("new-session")
     assert refused["is_error"] and "over the limit of 3 note chunks a day" in refused["preview"]
     assert store.private_count() == 2
-    assert (await _upload(api, "bob", "big.md", TWO_CHUNKS)).status_code == 429  # same visitor, same budget
+    assert (await _upload(visitors("bob"), "big.md", TWO_CHUNKS)).status_code == 429  # same visitor, same budget
 
 
 async def test_uploads_with_non_latin_names_are_kept_apart(store):
@@ -482,12 +516,12 @@ async def test_scanned_pdfs_have_their_own_daily_limit(api, monkeypatch):
     monkeypatch.setattr(main.app.state, "rate_limiters", build_rate_limiters(settings))
     main.app.state.provider.transcription = "Scanned notes."
 
-    first = await _upload(api, "alice", "scan1.pdf", _scan())
-    second = await _upload(api, "alice", "scan2.pdf", _scan())
+    first = await _upload(api, "scan1.pdf", _scan())
+    second = await _upload(api, "scan2.pdf", _scan())
 
     assert first.json() == {"doc_id": "scan1", "chunks": 1, "transcribed": True}
     assert second.status_code == 429 and "1 scanned PDFs a day" in second.json()["detail"]
-    assert (await _upload(api, "alice", "typed.md", b"Typed notes.")).status_code == 200  # other uploads unaffected
+    assert (await _upload(api, "typed.md", b"Typed notes.")).status_code == 200  # other uploads unaffected
 
 
 async def test_an_uploads_log_line_says_how_long_each_step_took(api, monkeypatch):
@@ -500,7 +534,7 @@ async def test_an_uploads_log_line_says_how_long_each_step_took(api, monkeypatch
     monkeypatch.setattr(get_settings(), "log_chat_text", False)
     main.app.state.provider.transcription = "Scanned notes."
 
-    await _upload(api, "alice", "bank-pin-4321.pdf", _scan())
+    await _upload(api, "bank-pin-4321.pdf", _scan())
 
     [line] = [f for f in logged if f["event"] == "note_uploaded"]
     assert [s["name"] for s in line["steps"]] == ["extract_text", "transcribe_pdf", "embed_documents", "store_upsert"]
@@ -521,7 +555,7 @@ async def test_a_failed_uploads_log_line_has_its_timings_too(api, monkeypatch):
 
     monkeypatch.setattr(main.app.state.provider, "transcribe_pdf", stalled)
 
-    r = await _upload(api, "alice", "scan.pdf", _scan())
+    r = await _upload(api, "scan.pdf", _scan())
 
     [line] = [f for f in logged if f["event"] == "upload_failed"]
     assert r.status_code == 503 and [s["name"] for s in line["steps"]] == ["extract_text", "transcribe_pdf"]

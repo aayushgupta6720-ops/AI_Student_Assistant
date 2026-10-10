@@ -6,6 +6,7 @@ import app.api.ratelimit as ratelimit
 import app.main as main
 from app.api.ratelimit import Limit, RateLimiter, build_rate_limiters, client_key
 from app.config import get_settings
+from app.intelligence.agent import AgentToken
 
 
 class Clock:
@@ -126,7 +127,7 @@ class CountingAgent:
     def __init__(self) -> None:
         self.turns = 0
 
-    async def run_turn(self, session_id, user_text, timezone=None):
+    async def run_turn(self, session_id, user_text, timezone=None, before_model_call=None):
         self.turns += 1
         return
         yield  # an async generator, like Agent.run_turn
@@ -148,7 +149,7 @@ async def _chat(visitor: str, session: str = "s", headers: dict | None = None) -
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
             "/chat",
-            json={"session_id": session, "message": "hi"},
+            json={"message": "hi"},
             headers={"CF-Connecting-IP": visitor, **(headers or {})},
         )
 
@@ -177,8 +178,60 @@ async def test_a_message_refused_as_invalid_does_not_use_up_the_allowance(agent)
     # message (a 422) counted against the visitor's minute.
     transport = httpx.ASGITransport(app=main.app, client=("10.0.0.1", 1234))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        too_long = await client.post("/chat", json={"session_id": "s", "message": "x" * 8001},
+        too_long = await client.post("/chat", json={"message": "x" * 8001},
                                      headers={"CF-Connecting-IP": "198.51.100.4"})
     assert too_long.status_code == 422
 
     assert [(await _chat("198.51.100.4")).status_code for _ in range(2)] == [200, 200]
+
+
+# ---- model calls --------------------------------------------------------------------
+
+
+class ToolLoopAgent:
+    """Makes `calls` model calls per turn, asking before each one, as Agent does."""
+
+    def __init__(self, calls: int) -> None:
+        self.calls, self.made = calls, 0
+
+    async def run_turn(self, session_id, user_text, timezone=None, before_model_call=None):
+        for _ in range(self.calls):
+            before_model_call()
+            self.made += 1
+            yield AgentToken("x")
+
+
+def _events(response: httpx.Response) -> list[str]:
+    return [block.split("\n", 1)[0].removeprefix("event: ") for block in response.text.strip().split("\n\n")]
+
+
+@pytest.fixture
+def calls_budget(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "client_ip_header", "CF-Connecting-IP")
+    monkeypatch.setattr(settings, "chat_model_calls_per_day", 5)
+    monkeypatch.setattr(settings, "chat_model_calls_per_day_all", 8)
+    agent = ToolLoopAgent(calls=3)  # a message that searches, reads and answers
+    monkeypatch.setattr(main.app.state, "agent", agent, raising=False)
+    monkeypatch.setattr(main.app.state, "rate_limiters", build_rate_limiters(settings), raising=False)
+    return agent
+
+
+async def test_model_calls_are_counted_not_just_messages(calls_budget):
+    # Two messages are well under 30 a day, but six model calls are over 5.
+    first = await _chat("198.51.100.4")
+    second = await _chat("198.51.100.4")
+
+    assert _events(first) == ["token"] * 3
+    assert _events(second)[:2] == ["token", "token"] and _events(second)[-1] == "error"
+    assert "limit of 5 model calls a day" in second.text
+    assert calls_budget.made == 5  # the sixth call was never made
+
+
+async def test_every_visitor_shares_one_daily_budget_of_model_calls(calls_budget):
+    for visitor in ("198.51.100.4", "203.0.113.9"):
+        await _chat(visitor)  # 3 calls each: 6 of the 8 shared
+    third = await _chat("192.0.2.77")  # a new visitor, with all of its own budget left
+
+    assert _events(third) == ["token", "token", "error"]
+    assert "8 model calls for everyone a day" in third.text

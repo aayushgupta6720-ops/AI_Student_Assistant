@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # up the shared daily Gemini quota. 0 turns a limit off.
     chat_limit_per_minute: int = 6
     chat_limit_per_day: int = 30
+    # A message can take up to max_agent_iterations model calls, so messages
+    # alone don't bound the quota: these count the calls themselves, per
+    # visitor and across everyone, out of the free tier's 500 a day.
+    chat_model_calls_per_day: int = 100
+    chat_model_calls_per_day_all: int = 400
     upload_limit_per_hour: int = 10
     # Uploads also count their chunks, since a big file is hundreds of chunks
     # to embed and keep in memory (a 200,000-character file is ~500).

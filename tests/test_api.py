@@ -17,7 +17,7 @@ class QuotaAgent:
     def __init__(self, error: QuotaExceededError) -> None:
         self.error = error
 
-    async def run_turn(self, session_id, user_text, timezone=None):
+    async def run_turn(self, session_id, user_text, timezone=None, before_model_call=None):
         raise self.error
         yield  # unreachable; makes this an async generator like Agent.run_turn
 
@@ -30,7 +30,7 @@ async def _chat_events(monkeypatch, agent) -> list[tuple[str, dict]]:
     monkeypatch.setattr(main.app.state, "rate_limiters", build_rate_limiters(get_settings()), raising=False)
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post("/chat", json={"session_id": "s", "message": "hi"})
+        response = await client.post("/chat", json={"message": "hi"})
     events = []
     for block in response.text.strip().split("\n\n"):
         event, data = block.split("\n", 1)
@@ -84,7 +84,7 @@ async def test_an_unexpected_error_shows_a_plain_message_not_the_exception(monke
 class SavingAgent:
     """A turn that saved a private note, as its trace records it."""
 
-    async def run_turn(self, session_id, user_text, timezone=None):
+    async def run_turn(self, session_id, user_text, timezone=None, before_model_call=None):
         trace = CallTrace()
         trace.add(StepRecord("tools", "save_note", 1.0, 1.0, depth=1,
                              meta={"args": {"title": "Bank", "content": "PIN 4321"}}))
@@ -108,6 +108,8 @@ async def test_the_log_keeps_the_length_of_what_was_typed_not_the_text(monkeypat
     assert "PIN" not in json.dumps(call).upper() and call["tools_used"] == ["save_note"]
     assert events["done"]["steps"][0]["meta"]["args"]["content"] == "PIN 4321"  # the chat still sees it all
     assert events["done"]["passages"] == {"bank-pin-4321": ["# Bank\n\nPIN 4321"]}  # for the source chips, never the log
+    # The session id unlocks the visitor's notes, so the log has a hash of it instead.
+    assert "session_id" not in call and len(call["session"]) == 12
 
 
 async def test_log_chat_text_logs_the_text_for_debugging(monkeypatch):

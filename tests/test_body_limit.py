@@ -27,15 +27,15 @@ async def _post(monkeypatch, tmp_path, path, **kwargs):
 async def test_an_oversized_chat_body_is_refused_before_it_is_read(monkeypatch, tmp_path):
     # FastAPI reads and parses the whole body before checking max_length: a
     # 52 MB message used to cost ~250 MB of memory before its 422.
-    r = await _post(monkeypatch, tmp_path, "/chat", json={"session_id": "s", "message": "x" * 200_000})
+    r = await _post(monkeypatch, tmp_path, "/chat", json={"message": "x" * 200_000})
     assert r.status_code == 413 and r.json() == {"detail": "The request is over the 128 KB limit."}
 
 
 async def test_uploads_get_room_for_a_full_size_file(monkeypatch, tmp_path):
     # A 2 MB file is still refused by the upload's own check, with its own message
-    near_limit = await _post(monkeypatch, tmp_path, "/notes/upload", data={"session_id": "a"},
+    near_limit = await _post(monkeypatch, tmp_path, "/notes/upload", data={},
                              files={"file": ("big.md", b"x" * (MAX_UPLOAD_BYTES + 1))})
     assert near_limit.status_code == 400 and "over the 2 MB limit" in near_limit.json()["detail"]
-    way_over = await _post(monkeypatch, tmp_path, "/notes/upload", data={"session_id": "a"},
+    way_over = await _post(monkeypatch, tmp_path, "/notes/upload", data={},
                            files={"file": ("huge.md", b"x" * (3 * MAX_UPLOAD_BYTES))})
     assert way_over.status_code == 413

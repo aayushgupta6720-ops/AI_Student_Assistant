@@ -17,7 +17,7 @@ The detail behind the [README](../README.md): how each part behaves, where the l
 
 Asking *"What's on my reading list?"* goes through the layers like this:
 
-1. **Client** posts `{session_id, message}` to `/chat` and starts reading the SSE stream.
+1. **Client** posts `{message}` to `/chat` (the browser sends the session cookie) and starts reading the SSE stream.
 2. **Intelligence** (`agent.run_turn`) appends the user message to session memory and calls `provider.stream_generate(system, history, registry.specs())`.
 3. **Inference** (`GeminiProvider`) converts the neutral `Message`s to Gemini `Content`s, streams the response, and yields `ToolCall(search_notes, {"query": "reading list"})`.
 4. **Intelligence** emits a `tool_call` event to the client and calls `registry.execute(...)`.
@@ -69,7 +69,8 @@ What visitors type, and the text of tool arguments, is logged as its length. It 
 ## Private notes
 
 - **Scoping.** Every stored chunk has an owner: `""` for the shared notes, or the session id that uploaded or saved it. `search()` masks out other owners' rows, and the agent sets a `current_session` context variable each turn, so `search_notes`, `read_note` and `save_note` are scoped without passing a session id through every tool. `save_note` never writes to `data/notes/`, which is the same for every visitor.
-- **Lifetime.** Private notes are deleted on New session (`POST /reset/{session_id}`, unless `?keep_uploads=true`, which a page reload uses) or after 24 hours. They live in the same index as the shared notes, so a deploy or restart also clears them. Closing the tab deletes nothing: the browser forgets the session id (it's in `sessionStorage`), and the notes stay, unreachable, until one of those.
+- **Sessions.** The server issues the session id: 192 random bits in an HttpOnly, SameSite=Strict `sid` cookie (Secure over https), set by the `SessionCookie` middleware in `app/api/session.py` on the first request. The client used to choose it: any 1-64 character string was accepted, so the README's curl example, which used `"cli"`, put everyone who copied it in one session; it travelled in URLs and was logged in full. Now a cookie the server couldn't have issued is replaced, nothing in a URL names a session, and logs carry a 12-character hash of it. The cookie is a browser session cookie, so the tabs of one browser share a session until it closes.
+- **Lifetime.** Private notes are deleted on New session (`POST /reset`, unless `?keep_uploads=true`, which a page reload uses) or after 24 hours. They live in the same index as the shared notes, so a deploy or restart also clears them, and on Render's free plan that includes the spin-down after about 15 idle minutes. Closing the browser deletes nothing: it forgets the cookie, and the notes stay, unreachable, until one of those.
 - **Chat history expires too.** Tool results quote private notes, so `SessionStore` forgets every message older than 24 hours (`max_age_s`, set in `app/main.py`). It sweeps every session on each read and write, so the chat of a closed tab expires as well, and it cuts at a user message so no tool result loses its tool call.
 - **Caps.** A session can have 10 private notes at a time, uploads and saved notes together. An upload is at most 2 MB and 200,000 characters of text, and a saved note at most 200,000 characters. The whole app keeps at most 10,000 private chunks (`MAX_PRIVATE_CHUNKS`), because search holds them all in memory: 10,000 took the process from 86 MB to a 205 MB peak. Past the cap, uploads get a 503 until older notes expire.
 - **Names.** A private note's id comes from its file name or title, in any script (`биология`, `生物`), and never matches a shared note's id: "Reading List.md" becomes `reading-list-2`, or searches and source chips would mix the two notes up.
@@ -114,6 +115,7 @@ The free-tier quota is shared by everyone using the app, so each visitor (an IP 
 | Limit | Default | Setting |
 |---|---|---|
 | Chat messages | 6 a minute, 30 a day | `CHAT_LIMIT_PER_MINUTE`, `CHAT_LIMIT_PER_DAY` |
+| Chat-model calls (a message takes up to 6) | 100 a day per visitor, 400 a day for everyone | `CHAT_MODEL_CALLS_PER_DAY`, `CHAT_MODEL_CALLS_PER_DAY_ALL` |
 | Uploads | 10 an hour | `UPLOAD_LIMIT_PER_HOUR` |
 | Note chunks (uploads and saved notes) | 1,000 a day | `UPLOAD_CHUNK_LIMIT_PER_DAY` |
 | Re-ingests | 3 an hour | `INGEST_LIMIT_PER_HOUR` |
@@ -123,7 +125,8 @@ A setting of 0 turns that limit off.
 - **Chunks, not just files.** A single upload can be about 500 chunks to embed and keep in memory, and starting a new session doesn't reset the count. Notes saved from chat count against the same budget, or chat alone could fill the server-wide cap.
 - **Refusals.** Over a limit, the endpoint returns a 429 with a `Retry-After` header, and the chat says how long to wait. The model isn't called for a refused request, and an upload over its chunk budget is refused before anything is embedded.
 - **Invalid messages.** A chat message only counts once it's valid, so an over-long one (the page checks the 8,000-character limit before sending) doesn't use up the minute's allowance.
-- **Where counts live.** They're kept in memory, which suits the single instance of Render's free plan, and reset on restart. Visitors sharing an IP, like a classroom behind one router, share one allowance.
+- **Calls, not just messages.** A message that searches, reads a note page by page and answers can take six model calls, so 30 messages could be 180 of the 500 the free tier allows a day, and three visitors could use them all. Each call counts against the visitor's budget and against one every visitor shares, which keeps about 100 a day for scanned PDFs and the eval. Running out partway through a message ends it with a note saying which limit was reached.
+- **Where counts live.** They're kept in memory, which suits the single instance of Render's free plan, and reset on restart, including the free plan's spin-down after about 15 idle minutes. A visitor using the app keeps it awake, so the limits hold while they're needed; keeping them across restarts would take a shared store such as Redis. Visitors sharing an IP, like a classroom behind one router, share one allowance.
 
 Request bodies over 128 KB (2.1 MB for `/notes/upload`) are refused with a 413 before they're read. FastAPI otherwise reads and parses a whole body before checking `max_length`, and a 52 MB message cost about 250 MB of memory on its way to a 422.
 
@@ -160,7 +163,7 @@ To check that the rate limit identifies visitors correctly, send 11 uploads that
 ```bash
 for i in $(seq 11); do curl -s -o /dev/null -w '%{http_code} ' \
   -H "X-Forwarded-For: 10.9.9.$i" \
-  -F session_id=check-$i -F 'file=@/dev/null;filename=x.exe' \
+  -F 'file=@/dev/null;filename=x.exe' \
   https://ai-student-assistant-hz02.onrender.com/notes/upload; done
 ```
 

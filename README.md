@@ -19,7 +19,7 @@ The app itself is a study assistant. You can ask questions about a set of shared
 
 - **Streaming chat with tool calling.** The model decides when to use one of six tools (search notes, read a whole note, save a note, calculator, current date and time, read a web page or PDF), and answers stream in token by token over Server-Sent Events.
 - **Retrieval over your notes (RAG).** Notes are split into chunks, embedded with Gemini and searched by cosine similarity, with codes and symbols such as `T07` or `MPSH 2A` also matched as exact keywords. Each answer lists the notes it used, and clicking one shows the exact passages.
-- **Private notes.** Uploads and saved notes belong to your chat session only: other visitors' searches never see them. They're deleted when you click New session, and otherwise within 24 hours (sooner if the free server restarts). The chat history that quotes them expires after 24 hours too.
+- **Private notes.** Uploads and saved notes belong to your session only, a random id the server issues in a cookie the page's scripts can't read: other visitors' searches never see them. They're deleted when you click New session, and otherwise within 24 hours (sooner if the free server restarts). The chat history that quotes them expires after 24 hours too.
 - **Visible architecture.** Under each answer is a timeline of every step and a bar showing how long each layer took.
 - **Stop button.** Stops an answer mid-stream without leaving the conversation history in a broken state.
 - **Built for a shared public demo.** Per-visitor rate limits, request size limits, safe URL fetching (no access to private networks) and sanitised Markdown rendering.
@@ -140,20 +140,20 @@ Settings are read from `.env`; `app/config.py` lists all of them. The main ones:
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/chat` | Send `{session_id, message, timezone?}` and get a Server-Sent Events stream back (`status`, `tool_call`, `tool_result`, `token`, `done`, `error`). `timezone` is an IANA name such as `Asia/Kolkata`, for the date tool (the web page sends the browser's); without it, the server's zone is used, which is UTC on Render. |
-| `GET` | `/notes?session_id=…` | The shared notes plus that session's private notes |
-| `POST` | `/notes/upload` | Upload a `.md`, `.txt` or `.pdf` note (multipart `session_id` and `file`, up to 2 MB) |
-| `DELETE` | `/notes/{doc_id}?session_id=…` | Delete one of the session's private notes |
+| `POST` | `/chat` | Send `{message, timezone?}` and get a Server-Sent Events stream back (`status`, `tool_call`, `tool_result`, `token`, `done`, `error`). `timezone` is an IANA name such as `Asia/Kolkata`, for the date tool (the web page sends the browser's); without it, the server's zone is used, which is UTC on Render. |
+| `GET` | `/notes` | The shared notes plus this session's private notes |
+| `POST` | `/notes/upload` | Upload a `.md`, `.txt` or `.pdf` note (multipart `file`, up to 2 MB) |
+| `DELETE` | `/notes/{doc_id}` | Delete one of this session's private notes |
 | `POST` | `/ingest` | Re-index `data/notes`; only new or changed notes are embedded |
-| `POST` | `/reset/{session_id}` | Clear the conversation and the session's private notes (`?keep_uploads=true` keeps the notes) |
+| `POST` | `/reset` | Clear the conversation and this session's private notes (`?keep_uploads=true` keeps the notes) |
 | `GET` | `/health` | Status, model, number of indexed chunks and tool names |
 | `GET` | `/docs` | Interactive API documentation from FastAPI |
 
-To see the raw event stream:
+Every endpoint works on the caller's session, which the server issues in an HttpOnly `sid` cookie on the first request; a cookie it couldn't have issued is replaced. To see the raw event stream, keep the cookie in a jar so later calls share the session:
 
 ```bash
-curl -N -X POST localhost:8000/chat -H 'Content-Type: application/json' \
-  -d '{"session_id":"cli","message":"What is on my reading list?"}'
+curl -N -c jar -b jar -X POST localhost:8000/chat -H 'Content-Type: application/json' \
+  -d '{"message":"What is on my reading list?"}'
 ```
 
 ## Testing

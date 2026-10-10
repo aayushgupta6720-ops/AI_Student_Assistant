@@ -7,11 +7,13 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.ratelimit import charge, rate_limit
+from app.api.ratelimit import ALL, charge, rate_limit
+from app.api.session import session_id as visitor_session
+from app.api.session import session_tag
 from app.config import get_settings
 from app.intelligence.agent import (
     Agent,
@@ -37,7 +39,6 @@ router = APIRouter()
 
 
 class ChatRequest(BaseModel):
-    session_id: str = Field(min_length=1, max_length=64)
     message: str = Field(min_length=1, max_length=8000)
     # IANA name, e.g. "Asia/Kolkata", so "today" means the user's today.
     timezone: str | None = Field(default=None, max_length=64)
@@ -118,18 +119,18 @@ async def health(request: Request) -> dict:
 
 
 @router.get("/notes")
-async def notes(request: Request, session_id: str | None = Query(default=None, max_length=64)) -> dict:
+async def notes(request: Request, session: str = Depends(visitor_session)) -> dict:
     """The shared notes, plus this session's private uploads (flagged)."""
     store = request.app.state.store
     store.purge_uploads(UPLOAD_TTL_S)
-    return {"docs": store.list_docs(owner=session_id)}
+    return {"docs": store.list_docs(owner=session)}
 
 
 @router.post("/notes/upload", dependencies=[rate_limit("upload")])
 async def upload_note(
     request: Request,
-    session_id: str = Form(min_length=1, max_length=64),
     file: UploadFile = File(),
+    session: str = Depends(visitor_session),
 ) -> dict:
     """Add a .md/.txt/.pdf note that only this session's searches can see."""
     data = await file.read(MAX_UPLOAD_BYTES + 1)  # one byte over is enough to refuse it
@@ -137,7 +138,7 @@ async def upload_note(
     trace, started = start_trace(), time.perf_counter()
     try:
         result = await ingest_upload(
-            session_id,
+            session,
             file.filename or "upload.txt",
             data,
             request.app.state.store,
@@ -146,25 +147,25 @@ async def upload_note(
             charge_transcription=lambda: charge(request, "transcribe"),
         )
     except PrivateNotesFullError as exc:
-        log_event(event="private_notes_full", session_id=session_id)
+        log_event(event="private_notes_full", session=session_tag(session))
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except UploadError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (QuotaExceededError, ModelOverloadedError, ModelTimeoutError) as exc:
         # Uploading embeds the note (and reads a scanned PDF), so it fails when the model provider does.
-        log_event(event="upload_failed", session_id=session_id, error=str(exc), **_timings(trace, started))
+        log_event(event="upload_failed", session=session_tag(session), error=str(exc), **_timings(trace, started))
         raise HTTPException(
             status_code=503, detail="The model is unavailable right now, so the note couldn't be read and indexed. Try again later."
         ) from exc
-    log_event(event="note_uploaded", session_id=session_id, doc_id=_loggable(result["doc_id"]), chunks=result["chunks"],
+    log_event(event="note_uploaded", session=session_tag(session), doc_id=_loggable(result["doc_id"]), chunks=result["chunks"],
               transcribed=result.get("transcribed", False), **_timings(trace, started))
     return result
 
 
 @router.delete("/notes/{doc_id}")
-async def delete_note(doc_id: str, request: Request, session_id: str = Query(min_length=1, max_length=64)) -> dict:
+async def delete_note(doc_id: str, request: Request, session: str = Depends(visitor_session)) -> dict:
     """Remove one of this session's uploads. Shared notes can't be deleted here."""
-    return {"deleted": request.app.state.store.delete_doc(doc_id, owner=session_id)}
+    return {"deleted": request.app.state.store.delete_doc(doc_id, owner=session)}
 
 
 @router.post("/ingest", dependencies=[rate_limit("ingest")])
@@ -181,19 +182,19 @@ async def ingest(request: Request) -> dict:
     return {"ingested": counts, "chunks_indexed": request.app.state.store.count()}
 
 
-@router.post("/reset/{session_id}")
-async def reset(session_id: str, request: Request, keep_uploads: bool = False) -> dict:
+@router.post("/reset")
+async def reset(request: Request, keep_uploads: bool = False, session: str = Depends(visitor_session)) -> dict:
     """Forget the conversation, and (unless keep_uploads) the session's uploads.
     The page calls it with keep_uploads on reload, which keeps the uploads
     but clears the chat it no longer shows."""
-    request.app.state.memory.reset(session_id)
+    request.app.state.memory.reset(session)
     if not keep_uploads:
-        request.app.state.store.delete_owner(session_id)
-    return {"reset": session_id}
+        request.app.state.store.delete_owner(session)
+    return {"reset": True}
 
 
 @router.post("/chat")
-async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
+async def chat(body: ChatRequest, request: Request, session: str = Depends(visitor_session)) -> StreamingResponse:
     # Counted here, once the body is valid, not as a route dependency: those
     # run before validation, so an over-long message used up an allowance.
     charge(request, "chat")
@@ -208,11 +209,18 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
         except HTTPException as exc:
             raise UploadError(exc.detail) from exc
 
+    def charge_model_call() -> None:
+        # Each model call counts against the visitor's daily budget and the
+        # one every visitor shares: a message can take up to six calls.
+        charge(request, "model_calls")
+        charge(request, "model_calls_all", key=ALL)
+
     async def stream():
         started = time.perf_counter()
         note_charge.set(charge_saved_notes)  # for save_note, like the agent's current_session
         try:
-            async for ev in agent.run_turn(body.session_id, body.message, timezone=body.timezone):
+            async for ev in agent.run_turn(session, body.message, timezone=body.timezone,
+                                           before_model_call=charge_model_call):
                 if isinstance(ev, AgentStatus):
                     yield _sse("status", asdict(ev))
                 elif isinstance(ev, AgentToolCall):
@@ -237,7 +245,7 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
                     }
                     log_event(
                         event="chat_call",
-                        session_id=body.session_id,
+                        session=session_tag(session),
                         query=_loggable(body.message),
                         latency_ms=round((time.perf_counter() - started) * 1000, 2),
                         # Not the passages either: they're the notes' own text.
@@ -251,15 +259,17 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
             # the agent has already tidied the turn out of memory.
             log_event(
                 event="chat_stopped",
-                session_id=body.session_id,
+                session=session_tag(session),
                 latency_ms=round((time.perf_counter() - started) * 1000, 2),
             )
             raise
+        except HTTPException as exc:  # a model-call budget ran out partway through the turn
+            yield _sse("error", {"kind": "rate_limited", "message": exc.detail, "resets_at": None})
         except QuotaExceededError as exc:
-            log_event(event="chat_quota_exceeded", session_id=body.session_id, daily=exc.daily, error=str(exc))
+            log_event(event="chat_quota_exceeded", session=session_tag(session), daily=exc.daily, error=str(exc))
             yield _sse("error", _quota_error(exc))
         except ModelOverloadedError as exc:
-            log_event(event="chat_model_overloaded", session_id=body.session_id, error=str(exc))
+            log_event(event="chat_model_overloaded", session=session_tag(session), error=str(exc))
             yield _sse("error", {
                 "kind": "overloaded",
                 "message": (
@@ -269,7 +279,7 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
                 "resets_at": None,
             })
         except ModelTimeoutError as exc:
-            log_event(event="chat_model_timeout", session_id=body.session_id, error=str(exc))
+            log_event(event="chat_model_timeout", session=session_tag(session), error=str(exc))
             yield _sse("error", {
                 "kind": "timeout",
                 "message": (
@@ -282,7 +292,7 @@ async def chat(body: ChatRequest, request: Request) -> StreamingResponse:
         except Exception as exc:  # noqa: BLE001 - report to the client instead of a dead stream
             # The details stay in the log: an exception's text can be a whole
             # provider error body, which means nothing to the person chatting.
-            log_event(event="chat_error", session_id=body.session_id, error=repr(exc))
+            log_event(event="chat_error", session=session_tag(session), error=repr(exc))
             yield _sse("error", {
                 "kind": "internal",
                 "message": "Something went wrong on the server while answering. Try again in a moment.",

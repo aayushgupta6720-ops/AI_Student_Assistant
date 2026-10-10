@@ -1,20 +1,9 @@
 // Client layer. Knows three things: how to POST /chat, how to parse SSE, and
 // how to render the events. It has no idea what a model, tool or vector is.
 
-// Kept in sessionStorage so a reload keeps this tab's private uploads (the
-// server scopes them to this id). Falls back to a fresh id if storage is off.
-// The id is all that guards those uploads, so it's 128 random bits from the
-// crypto API, not Math.random (getRandomValues also works over plain http).
-const sessionId = (() => {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  const fresh = "web-" + Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
-  try {
-    const saved = sessionStorage.getItem("sessionId");
-    if (saved) return saved;
-    sessionStorage.setItem("sessionId", fresh);
-  } catch { /* storage unavailable: a new id per page load */ }
-  return fresh;
-})();
+// The session (whose private uploads and chat these are) is a cookie the
+// server issues and this script can't read; the browser sends it with every
+// request, so nothing here names a session.
 const $ = (s) => document.querySelector(s);
 const messages = $("#messages"), input = $("#input"), sendBtn = $("#send"), stopBtn = $("#stop");
 const LAYERS = ["intelligence", "inference", "knowledge", "tools"];
@@ -36,7 +25,7 @@ async function getJSON(url, options) {
 
 async function loadSidebar() {
   try {
-    const [h, n] = await Promise.all([getJSON("/health"), getJSON(`/notes?session_id=${encodeURIComponent(sessionId)}`)]);
+    const [h, n] = await Promise.all([getJSON("/health"), getJSON("/notes")]);
     $("#model").textContent = h.model;
     $("#chunks").textContent = h.chunks_indexed;
     $("#tools").textContent = `${h.tools.length} available`;
@@ -179,7 +168,7 @@ async function chat(text) {
   controller = new AbortController();
   let answering = false;  // the server accepted it and began answering
   try {
-    const res = await fetch("/chat", { method: "POST", signal: controller.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId, message: text, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
+    const res = await fetch("/chat", { method: "POST", signal: controller.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) });
     if (!res.ok) throw new Error(await errorText(res));
     answering = true;
     const reader = res.body.getReader(), dec = new TextDecoder();
@@ -251,7 +240,7 @@ $("#newsession").addEventListener("click", async () => {
   setDrawer(false);
   stop();  // an answer still streaming belongs to the old chat
   try {
-    await getJSON(`/reset/${encodeURIComponent(sessionId)}`, { method: "POST" });
+    await getJSON("/reset", { method: "POST" });
   } catch (err) {
     showNoteStatus(`Couldn't start a new session (${err.message})`, false);
     return;
@@ -277,7 +266,6 @@ $("#upload-input").addEventListener("change", async (e) => {
   btn.disabled = true; btn.textContent = "Uploading…";
   try {
     const form = new FormData();
-    form.append("session_id", sessionId);
     form.append("file", file);
     const res = await fetch("/notes/upload", { method: "POST", body: form });
     if (!res.ok) throw new Error(await errorText(res));
@@ -297,7 +285,7 @@ $("#notes").addEventListener("click", async (e) => {
   if (!btn) return;
   btn.disabled = true;
   try {
-    const r = await getJSON(`/notes/${encodeURIComponent(btn.dataset.doc)}?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    const r = await getJSON(`/notes/${encodeURIComponent(btn.dataset.doc)}`, { method: "DELETE" });
     // Not there any more, e.g. expired after 24 hours, or removed in another tab.
     showNoteStatus(r.deleted ? `Removed ${btn.dataset.doc}` : `${btn.dataset.doc} had already been removed`, true);
   } catch (err) {
@@ -323,7 +311,7 @@ $("#reingest").addEventListener("click", async (e) => {
   }
 });
 
-// A reload keeps the session id (and its uploads) but not the chat on screen,
+// A reload keeps the session (and its uploads) but not the chat on screen,
 // so clear the server-side conversation to match what the page shows.
-fetch(`/reset/${encodeURIComponent(sessionId)}?keep_uploads=true`, { method: "POST" }).catch(() => {});
+fetch("/reset?keep_uploads=true", { method: "POST" }).catch(() => {});
 loadSidebar();

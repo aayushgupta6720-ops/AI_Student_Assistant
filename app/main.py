@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.body_limit import BodySizeLimit
 from app.api.ratelimit import build_rate_limiters
 from app.api.routes import router
+from app.api.session import SessionCookie
 from app.config import PROJECT_ROOT, get_settings
 from app.inference.gemini import get_provider          # inference layer
 from app.intelligence.agent import Agent                # intelligence layer
@@ -73,6 +74,7 @@ app.include_router(router)
 app.mount("/static", StaticFiles(directory=CLIENT_DIR), name="static")
 # A chat message is at most 8,000 chars, well under 128 KB even fully escaped;
 # an upload is up to MAX_UPLOAD_BYTES plus the multipart form around it.
+app.add_middleware(SessionCookie)  # every request gets a session the server issued
 app.add_middleware(
     BodySizeLimit,
     max_bytes=128 * 1024,

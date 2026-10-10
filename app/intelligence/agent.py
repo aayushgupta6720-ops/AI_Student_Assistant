@@ -12,7 +12,7 @@ sees, when tools run, and when the turn is finished.
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Union
+from typing import AsyncIterator, Callable, Union
 
 from app.config import get_settings
 from app.inference.provider import LLMProvider
@@ -104,12 +104,19 @@ class Agent:
         self.max_iterations = max_iterations or get_settings().max_agent_iterations
 
     async def run_turn(
-        self, session_id: str, user_text: str, timezone: str | None = None
+        self,
+        session_id: str,
+        user_text: str,
+        timezone: str | None = None,
+        before_model_call: Callable[[], None] | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        """One turn. `before_model_call` runs before each model call, so the
+        caller can count calls against a budget; if it raises, the turn ends
+        there, like a model error."""
         turn: list[Message] = []  # what this turn has added to memory
         said: list[str] = []  # the answer text streamed so far
         try:
-            async for event in self._turn(session_id, user_text, timezone, turn, said):
+            async for event in self._turn(session_id, user_text, timezone, turn, said, before_model_call):
                 yield event
         except BaseException:  # Stop, a closed tab, or a model error: the turn won't finish
             self._abandon(session_id, turn, "".join(said))
@@ -132,7 +139,13 @@ class Agent:
         self.memory.append(session_id, message)
 
     async def _turn(
-        self, session_id: str, user_text: str, timezone: str | None, turn: list[Message], said: list[str]
+        self,
+        session_id: str,
+        user_text: str,
+        timezone: str | None,
+        turn: list[Message],
+        said: list[str],
+        before_model_call: Callable[[], None] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         trace = start_trace()
         current_session.set(session_id)  # tools' searches see this session's uploads
@@ -159,6 +172,8 @@ class Agent:
             yield AgentStatus("thinking", iterations)
 
             # -- 1. ask the model (inference layer) ------------------------------
+            if before_model_call:
+                before_model_call()
             text_parts: list[TextPart] = []
             tool_calls: list[ToolCall] = []
             with time_step("inference", "generate", iteration=iterations) as usage:
