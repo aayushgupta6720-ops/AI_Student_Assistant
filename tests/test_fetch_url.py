@@ -213,3 +213,34 @@ async def test_a_pdf_is_recognised_by_its_content(server, loopback_is_public):
     assert page["type"] == "page" and page["text"] == "Please sign in"
     with pytest.raises(ValueError, match="isn't a web page, text or a readable PDF"):
         await fetch_url(f"{server}/data.bin")
+
+
+# ---- the tool opens only links the user typed --------------------------------
+
+
+def test_finds_the_links_a_message_contains():
+    text = "Read https://Example.com/notes/, www.site.org/syllabus. and (https://a.io/x?id=7)"
+    assert builtin.links_in(text) == {"example.com/notes", "site.org/syllabus", "a.io/x?id=7"}
+
+
+@pytest.mark.parametrize(
+    "url, same",
+    [
+        ("https://www.example.com/notes/", True),  # host case, "www." and a trailing slash aside
+        ("http://example.com/notes", True),
+        ("https://example.com/notes?d=my+private+note", False),  # a query is where data would go
+        ("https://example.com/notes/extra", False),
+        ("https://evil.example/notes", False),
+    ],
+)
+def test_a_link_matches_only_the_one_typed(url, same):
+    assert (builtin._link_key(url) in builtin.links_in("see example.com/notes")) is same
+
+
+async def test_the_tool_refuses_a_link_the_user_never_gave(server, loopback_is_public, http_server):
+    builtin.user_links.set(builtin.links_in(f"summarise {server}/page please."))
+
+    assert (await builtin.fetch_user_link(f"{server}/page"))["text"] == "Hello world"
+    with pytest.raises(PermissionError, match="only links the user typed"):
+        await builtin.fetch_user_link(f"{server}/page?d=secret")
+    assert [path for path, _ in http_server.seen] == ["/page"]  # the refused one never left

@@ -30,7 +30,7 @@ from app.intelligence.memory import SessionStore
 from app.knowledge.retrieval import current_session
 from app.intelligence.prompts import FINAL_CALL_NOTE, SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
 from app.observability import CallTrace, start_trace, time_step
-from app.tools.builtin import user_timezone
+from app.tools.builtin import links_in, user_links, user_timezone
 from app.tools.registry import ToolRegistry
 
 # ---- events the intelligence layer emits to whoever is driving it -----------
@@ -138,6 +138,11 @@ class Agent:
         current_session.set(session_id)  # tools' searches see this session's uploads
         user_timezone.set(timezone)  # current_datetime answers in the user's zone
         self._remember(session_id, turn, Message("user", [TextPart(user_text)]))
+        # fetch_url opens only links the user typed, never one a page suggested.
+        user_links.set(links_in(" ".join(
+            part.text for m in self.memory.history(session_id) if m.role == "user"
+            for part in m.parts if isinstance(part, TextPart)
+        )))
 
         answer_parts: list[str] = []
         sources: list[str] = []
