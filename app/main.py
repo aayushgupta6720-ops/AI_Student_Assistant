@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.body_limit import BodySizeLimit
-from app.api.ratelimit import build_rate_limiters
+from app.api.ratelimit import build_rate_limiters, redis_client
 from app.api.routes import router
 from app.api.session import SessionCookie
 from app.config import PROJECT_ROOT, get_settings
@@ -65,7 +65,9 @@ async def lifespan(app: FastAPI):
     app.state.registry = registry
     app.state.memory = memory
     app.state.agent = Agent(provider, registry, memory)
-    app.state.rate_limiters = build_rate_limiters(settings)
+    redis = redis_client(settings.redis_url) if settings.redis_url else None
+    app.state.rate_limiters = build_rate_limiters(settings, redis)
+    log_event(event="rate_limit_store", backend="redis" if redis else "memory")
     yield
 
 

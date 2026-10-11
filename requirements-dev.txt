@@ -1,0 +1,3 @@
+-r requirements.txt
+# in-memory Redis for tests; [lua] runs the rate limiter's script
+fakeredis[lua]==2.38.0

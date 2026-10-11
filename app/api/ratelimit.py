@@ -2,20 +2,23 @@
 the shared daily Gemini quota for everyone. A visitor is an IP address (for
 IPv6, its /64, since one visitor usually holds all 2^64 of those).
 
-Counts live in memory: right for a single instance (Render's free plan runs
-one), and they reset on restart, including the free plan's spin-down after
-about 15 idle minutes. A visitor using the app keeps it awake, so a day's
-limits hold while they matter; a shared store such as Redis would keep them
-across restarts and instances."""
+With REDIS_URL set, counts live in Redis, so they survive restarts (on
+Render's free plan, the service restarts every time it wakes from its
+spin-down after about 15 idle minutes) and would be shared by several
+instances. Without it, or while Redis is unreachable, they live in the
+process."""
 
 import ipaddress
 import math
+import secrets
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Callable
 
 from fastapi import Depends, HTTPException, Request
+from redis import Redis
+from redis.exceptions import RedisError
 
 from app.config import Settings, get_settings
 from app.observability import log_event
@@ -77,7 +80,115 @@ class RateLimiter:
         return None
 
 
-def build_rate_limiters(settings: Settings) -> dict[str, RateLimiter]:
+# RateLimiter.hit, run inside Redis so the check and the count are one atomic
+# step. KEYS[1] is the key's sorted set of requests, scored by time, each
+# member ending in ":<cost>". ARGV is now, a unique member, the cost, then
+# count and window for each limit. Returns {index of the refusing limit
+# (1-based, 0 if none), wait in seconds}; the wait is a string because Redis
+# truncates Lua numbers to integers.
+_SLIDING_WINDOW = """
+local now, member, cost = tonumber(ARGV[1]), ARGV[2], tonumber(ARGV[3])
+local longest = 0
+for i = 4, #ARGV, 2 do
+  longest = math.max(longest, tonumber(ARGV[i + 1]))
+end
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - longest)
+for i = 4, #ARGV, 2 do
+  local count, window = tonumber(ARGV[i]), tonumber(ARGV[i + 1])
+  local hits = redis.call('ZRANGEBYSCORE', KEYS[1], '(' .. (now - window), '+inf', 'WITHSCORES')
+  local used = 0
+  for j = 1, #hits, 2 do
+    used = used + tonumber(string.match(hits[j], ':(%d+)$'))
+  end
+  if used + cost > count then
+    for j = 1, #hits, 2 do  -- oldest first, as they leave the window
+      used = used - tonumber(string.match(hits[j], ':(%d+)$'))
+      if used + cost <= count then
+        return {(i - 2) / 2, tostring(tonumber(hits[j + 1]) + window - now)}
+      end
+    end
+    return {(i - 2) / 2, tostring(window)}
+  end
+end
+redis.call('ZADD', KEYS[1], now, member)
+redis.call('EXPIRE', KEYS[1], math.ceil(longest))
+return {0, '0'}
+"""
+
+
+class RedisOutage:
+    """After a Redis error, skip Redis for a while instead of waiting out its
+    timeout on every request; log once per outage, not once per request."""
+
+    def __init__(self, retry_after_s: float = 30.0, clock: Callable[[], float] = time.monotonic) -> None:
+        self.retry_after_s = retry_after_s
+        self._clock = clock
+        self._down_since: float | None = None
+
+    def skip(self) -> bool:
+        return self._down_since is not None and self._clock() - self._down_since < self.retry_after_s
+
+    def failed(self, exc: Exception) -> None:
+        if self._down_since is None:
+            log_event(event="redis_unavailable", used_by="rate_limit", error=str(exc))
+        self._down_since = self._clock()
+
+    def worked(self) -> None:
+        self._down_since = None
+
+
+class RedisRateLimiter:
+    """RateLimiter's limits, counted in Redis. If Redis fails, requests are
+    counted by the in-process `fallback` instead: still limited, just not kept,
+    rather than either refusing everyone or letting everyone through.
+
+    The client is synchronous because charge() is called from synchronous
+    callbacks (before each model call, on each saved note). On Render's private
+    network a call takes about a millisecond, and the client's short timeouts
+    plus RedisOutage bound how long a Redis problem can hold up a request."""
+
+    def __init__(
+        self,
+        fallback: RateLimiter,
+        redis: Redis,
+        outage: RedisOutage,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.what = fallback.what
+        self.limits = fallback.limits
+        self._fallback = fallback
+        self._script = redis.register_script(_SLIDING_WINDOW)
+        self._outage = outage
+        # Wall-clock time, unlike RateLimiter: the counts outlive the process.
+        self._clock = clock
+
+    def hit(self, key: str, cost: int = 1) -> tuple[Limit, float] | None:
+        if not self.limits:
+            return None
+        if self._outage.skip():
+            return self._fallback.hit(key, cost)
+        now = self._clock()
+        args = [now, f"{now}:{secrets.token_hex(4)}:{cost}", cost]
+        for limit in self.limits:
+            args += [limit.count, limit.window_s]
+        try:
+            refused, wait = self._script(keys=[f"ratelimit:{self.what}:{key}"], args=args)
+        except RedisError as exc:
+            self._outage.failed(exc)
+            return self._fallback.hit(key, cost)
+        self._outage.worked()
+        if int(refused) == 0:
+            return None
+        return self.limits[int(refused) - 1], float(wait)
+
+
+def redis_client(url: str) -> Redis:
+    return Redis.from_url(url, socket_timeout=0.5, socket_connect_timeout=0.5)
+
+
+def build_rate_limiters(
+    settings: Settings, redis: Redis | None = None
+) -> dict[str, RateLimiter | RedisRateLimiter]:
     """One limiter per costly endpoint. A chat message counts once, and each
     model call it makes counts again (one message can take up to six), per
     visitor and across all of them (key ALL), since every visitor shares one
@@ -85,7 +196,7 @@ def build_rate_limiters(settings: Settings) -> dict[str, RateLimiter]:
     chunks count too, since one file can be ~500 chunks to embed and keep in
     memory, and so does a scanned PDF, which takes a chat-model call to
     transcribe."""
-    return {
+    limiters = {
         "chat": RateLimiter("messages", [
             Limit(settings.chat_limit_per_minute, 60, "a minute"),
             Limit(settings.chat_limit_per_day, 24 * 3600, "a day"),
@@ -99,6 +210,10 @@ def build_rate_limiters(settings: Settings) -> dict[str, RateLimiter]:
         "ingest": RateLimiter("re-ingests", [Limit(settings.ingest_limit_per_hour, 3600, "an hour")]),
         "transcribe": RateLimiter("scanned PDFs", [Limit(settings.transcribe_limit_per_day, 24 * 3600, "a day")]),
     }
+    if redis is None:
+        return limiters
+    outage = RedisOutage()  # one for all of them: Redis is either up or not
+    return {name: RedisRateLimiter(limiter, redis, outage) for name, limiter in limiters.items()}
 
 
 _warned_missing_header = False
@@ -149,7 +264,7 @@ ALL = "everyone"  # the key for limits shared by every visitor
 def charge(request: Request, name: str, cost: int = 1, key: str | None = None) -> None:
     """Count `cost` against this visitor's `name` limits (or `key`'s, e.g.
     ALL), or refuse the request with a 429 if that would take them over one."""
-    limiter: RateLimiter = request.app.state.rate_limiters[name]
+    limiter: RateLimiter | RedisRateLimiter = request.app.state.rate_limiters[name]
     key = key or client_key(request)
     refused = limiter.hit(key, cost)
     if refused is None:

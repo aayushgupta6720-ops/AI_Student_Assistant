@@ -34,7 +34,8 @@ The app itself is a study assistant. You can ask questions about a set of shared
 | Vector search | SQLite for storage, NumPy for cosine similarity |
 | Frontend | HTML, CSS and vanilla JavaScript over Server-Sent Events; marked and DOMPurify for Markdown |
 | Documents | pypdf |
-| Testing | pytest, pytest-asyncio |
+| Rate-limit counts | Redis (Render Key Value) when `REDIS_URL` is set, otherwise in memory |
+| Testing | pytest, pytest-asyncio, fakeredis |
 | Hosting | Render (free plan) |
 
 ## Architecture
@@ -111,7 +112,7 @@ Because each layer only depends on the interface below it, changing one stays lo
 git clone https://github.com/aayushgupta6720-ops/AI_Student_Assistant.git
 cd AI_Student_Assistant
 python3.12 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # requirements.txt, plus fakeredis for the tests
 cp .env.example .env        # then put your GEMINI_API_KEY in .env
 uvicorn app.main:app --reload
 ```
@@ -135,6 +136,7 @@ Settings are read from `.env`; `app/config.py` lists all of them. The main ones:
 | `CLIENT_IP_HEADER` | unset | The header holding the visitor's IP behind a proxy (`CF-Connecting-IP` on Render) |
 | `LOG_CHAT_TEXT` | `false` | Log what visitors type, not just its length |
 | `CHAT_LIMIT_PER_MINUTE`, `CHAT_LIMIT_PER_DAY` and others | 6, 30, … | Per-visitor limits ([all of them](docs/ENGINEERING_NOTES.md#rate-limits-and-request-size)) |
+| `REDIS_URL` | unset | Where the rate limits keep their counts, so a restart doesn't reset them; unset means in memory |
 
 ## API
 
@@ -204,7 +206,6 @@ Running a public demo on free tiers turned up problems I wouldn't have met in a 
 
 - Persistent storage (Postgres with pgvector, and Redis for sessions) so notes and conversations survive deploys and restarts
 - User accounts instead of anonymous session ids
-- Rate-limit counters shared between instances, so the app can run on more than one server
 - The paid Gemini tier, whose terms don't let Google use uploaded notes to improve its products; the free tier's terms do
 - A Dockerfile, so it runs the same way anywhere
 

@@ -1,10 +1,14 @@
+import random
+
+import fakeredis
 import httpx
 import pytest
 from starlette.requests import Request
 
 import app.api.ratelimit as ratelimit
 import app.main as main
-from app.api.ratelimit import Limit, RateLimiter, build_rate_limiters, client_key
+from app.api.ratelimit import (Limit, RateLimiter, RedisOutage, RedisRateLimiter, build_rate_limiters,
+                               client_key)
 from app.config import get_settings
 from app.intelligence.agent import AgentToken
 
@@ -74,6 +78,65 @@ def test_a_zero_limit_is_off_and_tracked_visitors_are_capped():
     for key in ("a", "b", "c"):
         limiter.hit(key)
     assert list(limiter._hits) == ["b", "c"]
+
+
+# ---- counts in Redis ------------------------------------------------------------------
+
+
+def _in_redis(limiter: RateLimiter, server: fakeredis.FakeServer, clock) -> RedisRateLimiter:
+    return RedisRateLimiter(limiter, fakeredis.FakeRedis(server=server), RedisOutage(), clock=clock)
+
+
+def test_redis_counts_exactly_like_memory():
+    # The Lua script is RateLimiter.hit in another language: the same random
+    # mix of costs, keys and gaps must get the same answers from both.
+    rng = random.Random(7)
+    clock = Clock()
+    limits = [Limit(5, 60, "a minute"), Limit(12, 3600, "an hour")]
+    memory = RateLimiter("calls", limits, clock=clock)
+    redis = _in_redis(RateLimiter("calls", limits), fakeredis.FakeServer(), clock)
+    refusals = 0
+    for _ in range(400):
+        clock.now += rng.choice([0.5, 3, 10, 45, 300])
+        key, cost = rng.choice("ab"), rng.choice([1, 1, 1, 2, 4, 13])
+        expected, got = memory.hit(key, cost), redis.hit(key, cost)
+        assert (expected is None) == (got is None)
+        if expected is not None:
+            refusals += 1
+            assert got[0] == expected[0] and got[1] == pytest.approx(expected[1])
+    assert 50 < refusals < 350  # both answers came up plenty
+
+
+def test_counts_in_redis_survive_a_restart():
+    server, clock = fakeredis.FakeServer(), Clock()
+    before = _in_redis(RateLimiter("calls", [Limit(3, 86400, "a day")]), server, clock)
+    assert [before.hit("a") for _ in range(3)] == [None, None, None]
+    after = _in_redis(RateLimiter("calls", [Limit(3, 86400, "a day")]), server, clock)  # a new process
+    assert after.hit("a")[0].per == "a day"
+
+
+def test_while_redis_is_down_the_process_counts_and_it_is_logged_once(monkeypatch):
+    logged = []
+    monkeypatch.setattr(ratelimit, "log_event", lambda **fields: logged.append(fields))
+    server, clock = fakeredis.FakeServer(), Clock()
+    outage = RedisOutage(clock=clock)
+    limiter = RedisRateLimiter(RateLimiter("calls", [Limit(2, 86400, "a day")], clock=clock),
+                               fakeredis.FakeRedis(server=server), outage, clock=clock)
+    assert limiter.hit("a") is None  # in Redis
+    server.connected = False
+    assert limiter.hit("a") is None and limiter.hit("a") is None  # the process's own count: 2
+    assert limiter.hit("a") is not None
+    assert [e["event"] for e in logged] == ["redis_unavailable"]
+    server.connected = True
+    assert limiter.hit("a") is not None  # still skipping Redis for 30 s, so still the process's count
+    clock.now += 30
+    assert limiter.hit("a") is None  # back on Redis, which had counted 1
+
+
+def test_with_a_redis_client_every_limiter_counts_in_redis():
+    limiters = build_rate_limiters(get_settings(), fakeredis.FakeRedis(server=fakeredis.FakeServer()))
+    assert all(isinstance(limiter, RedisRateLimiter) for limiter in limiters.values())
+    assert all(isinstance(limiter, RateLimiter) for limiter in build_rate_limiters(get_settings()).values())
 
 
 # ---- who the visitor is -------------------------------------------------------------

@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # CF-Connecting-IP). Unset means the connecting address, right when
     # nothing sits in front. Never X-Forwarded-For: visitors can forge it.
     client_ip_header: str | None = None
+    # Where the rate limits keep their counts, so a restart doesn't reset
+    # them (redis://host:port). Unset means in memory.
+    redis_url: str = ""
     # Log what visitors typed and the text of tool arguments. Off, the log
     # keeps their lengths: they can hold private notes, which the app
     # otherwise deletes after 24 hours. Turn on to debug from the log.
