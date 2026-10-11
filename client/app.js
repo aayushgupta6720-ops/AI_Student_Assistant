@@ -67,19 +67,50 @@ const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt
 // The answer can repeat text from web pages and notes someone else wrote, so
 // render only the tags markdown makes: no raw HTML or scripts, and no images or
 // styles, which load a URL on their own and could carry chat contents off-site.
+// Formulas come out of KaTeX as MathML: its elements and their layout
+// attributes are allowed too, but still no styles and no links.
+const MATHML_TAGS = ["math", "semantics", "annotation", "mrow", "mi", "mn", "mo", "ms", "mtext", "mspace", "msup",
+  "msub", "msubsup", "mfrac", "msqrt", "mroot", "mover", "munder", "munderover", "mtable", "mtr", "mtd", "mstyle",
+  "mpadded", "mphantom", "menclose"];
+const MATHML_ATTR = ["xmlns", "display", "mathvariant", "stretchy", "fence", "separator", "lspace", "rspace",
+  "accent", "accentunder", "minsize", "maxsize", "width", "height", "depth", "voffset", "columnalign",
+  "rowspacing", "columnspacing", "scriptlevel", "displaystyle", "linethickness", "encoding", "movablelimits",
+  "symmetric", "largeop", "notation"];
 const MARKDOWN_ONLY = {
   ALLOWED_TAGS: ["p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "em", "strong", "del", "code", "pre",
-    "blockquote", "ul", "ol", "li", "a", "table", "thead", "tbody", "tr", "th", "td"],
-  ALLOWED_ATTR: ["href", "title", "start", "align"],
+    "blockquote", "ul", "ol", "li", "a", "table", "thead", "tbody", "tr", "th", "td", ...MATHML_TAGS],
+  ALLOWED_ATTR: ["href", "title", "start", "align", ...MATHML_ATTR],
 };
 // Links open in a new tab: following one in this tab and coming back reloads
 // the page, and a reload clears the chat.
 window.DOMPurify?.addHook("afterSanitizeAttributes", (node) => {
   if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
 });
+// LaTeX the model writes for formulas, notes on physics most of all: $$…$$ and
+// \[…\] on a line of their own, \(…\) and $…$ inline. A $…$ pair only counts if
+// it holds something mathematical (\ ^ _ = {), so "$5 and $6" stay prices.
+const MATH = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$([^$\n]*[\\^_={][^$\n]*)\$/g;
+
+// Formulas are taken out before markdown sees them (it would read their _ and *
+// as emphasis), rendered by KaTeX, and put back; then everything is sanitized.
+function withMath(text) {
+  if (!window.katex) return { text, put: (html) => html };
+  const rendered = [];
+  const slotted = text.replace(MATH, (whole, d1, d2, i1, i2) => {
+    try {
+      rendered.push(katex.renderToString(d1 ?? d2 ?? i1 ?? i2, {
+        output: "mathml", displayMode: d1 !== undefined || d2 !== undefined, throwOnError: false, trust: false,
+      }));
+      return `MATHSLOT${rendered.length - 1}END`;
+    } catch { return whole; }
+  });
+  return { text: slotted, put: (html) => html.replace(/MATHSLOT(\d+)END/g, (_, i) => rendered[Number(i)]) };
+}
+
 function renderMarkdown(el, text) {
-  if (window.marked && window.DOMPurify) el.innerHTML = DOMPurify.sanitize(marked.parse(text), MARKDOWN_ONLY);
-  else el.textContent = text;  // a CDN script didn't load: plain text beats unsafe HTML
+  if (!(window.marked && window.DOMPurify)) { el.textContent = text; return; }  // plain text beats unsafe HTML
+  const math = withMath(text);
+  el.innerHTML = DOMPurify.sanitize(math.put(marked.parse(math.text)), MARKDOWN_ONLY);
 }
 
 // A source a search returned passages from is a button that shows them;

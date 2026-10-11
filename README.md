@@ -32,7 +32,7 @@ The app itself is a study assistant. You can ask questions about a set of shared
 | Backend | Python 3.12, FastAPI, Uvicorn |
 | Model | Google Gemini through `google-genai`: `gemini-3.5-flash-lite` for chat, `gemini-embedding-001` for embeddings |
 | Vector search | SQLite for storage, NumPy for cosine similarity |
-| Frontend | HTML, CSS and vanilla JavaScript over Server-Sent Events; marked and DOMPurify for Markdown |
+| Frontend | HTML, CSS and vanilla JavaScript over Server-Sent Events; marked and DOMPurify for Markdown, KaTeX for formulas (as MathML) |
 | Documents | pypdf |
 | Rate-limit counts | Redis (Render Key Value) when `REDIS_URL` is set, otherwise in memory |
 | Testing | pytest, pytest-asyncio, fakeredis |
@@ -172,7 +172,7 @@ Whether the model picks the right tool can only be checked against the real mode
 python -m scripts.eval_routing    # uses about 20 Gemini requests
 ```
 
-A second evaluation checks the answers themselves: it uploads three study notes and asks 20 questions, from single facts and course codes to whole-document summaries and questions the notes don't cover ([more](docs/ENGINEERING_NOTES.md#evaluating-answers)). It spends about 120 requests, so it runs on a separate key (`EVAL_GEMINI_API_KEY`):
+A second evaluation checks the answers themselves: it uploads four study notes and asks 28 questions, from single facts and course codes to whole-document summaries and questions the notes don't cover. An answer only passes if it came from the right note, and 8 of the questions are held out, about a fictional course whose conventions only its notes have, so the model can't answer from what it already knows. It scores 28/28 ([more](docs/ENGINEERING_NOTES.md#evaluating-answers)). It spends about 120 requests, so it runs on a separate key (`EVAL_GEMINI_API_KEY`):
 
 ```bash
 python -m scripts.eval_answers

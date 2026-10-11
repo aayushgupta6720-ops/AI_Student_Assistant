@@ -71,3 +71,15 @@ def test_it_refuses_to_spend_the_demo_key_unless_told_to(monkeypatch, capsys):
 
     assert eval_answers.main() == 2
     assert "EVAL_GEMINI_API_KEY" in capsys.readouterr().out
+
+
+def test_the_right_facts_without_the_note_are_not_a_pass():
+    # An answer the model knew already isn't evidence that it read the notes.
+    case = eval_answers.Case(id="x", category="single_fact", question="q", docs=["cell-biology"], facts=[r"stroma"])
+    assert not eval_answers.Result(case, answer="In the stroma.", sources=(), answer_hits=(True,)).passed
+    assert eval_answers.Result(case, answer="In the stroma.", sources=("cell-biology",), answer_hits=(True,)).passed
+
+
+def test_latex_reads_as_the_chat_shows_it():
+    # The chat renders formulas, so "$g = 10\\text{ m/s}^2$" is a correct "10 m/s".
+    assert re.search(r"\b10\s*m/s", eval_answers.normalise(r"Use $g = 10\text{ m/s}^2$ in every calculation."))

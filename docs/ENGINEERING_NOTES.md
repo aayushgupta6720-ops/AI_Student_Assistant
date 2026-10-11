@@ -108,6 +108,8 @@ That PDF is now refused in under 0.1 s. The worst variant tested, 40 pages each 
 
 **Rendering.** Answers are rendered as Markdown through DOMPurify with only Markdown's own tags allowed, so HTML the model repeats from a web page or note can't run scripts or load images. marked and DOMPurify load from cdnjs pinned by integrity hash, so a tampered copy doesn't run (answers then show as plain text). Links in answers open in a new tab, since leaving the page and coming back clears the chat.
 
+**Formulas.** The model writes formulas in LaTeX (`$g = 10\text{ m/s}^2$`), especially from physics notes, and before 2026-10-11 the chat showed them as typed. Asking it in the prompt not to cut LaTeX only partly (two of seven physics answers still had it), so the page renders it instead. Formulas (`$$…$$` and `\[…\]` on their own line, `\(…\)` and `$…$` inline, a `$…$` pair only if it holds `\ ^ _ = {`, so "$5 and $6" stay prices) are taken out before Markdown parsing, which would read their `_` and `*` as emphasis. KaTeX renders them as MathML, and they go back in before sanitizing. MathML is drawn by the browser itself, so it needs no stylesheet, and the sanitizer still allows no `style` attribute and no links: MathML's elements and layout attributes are added to its allow-list, nothing else. KaTeX runs with `trust: false`, so `\href` can't make a link, and it loads from cdnjs pinned by hash like the others; without it, formulas show as typed. Checked in Chrome: formulas render, prices don't, and `\href{javascript:…}`, `<img onerror>` and `<script>` come out inert.
+
 ## Rate limits and request size
 
 The free-tier quota is shared by everyone using the app, so each visitor (an IP address; for IPv6, its /64) gets its own allowance:
@@ -187,9 +189,9 @@ With `read_note` (`assistant_v3`), a summary question must search and then read.
 
 ## Evaluating answers
 
-`eval_routing` only checks which tool the model picks. `scripts/eval_answers.py` checks the answers themselves. It uploads three study notes from `data/eval/notes` the way a visitor would: as private notes under one session, alongside the shared notes, which compete in every search as they do live. Then it asks each of the 20 questions in `data/eval/cases.json` in a fresh chat. The notes are a 17,000-character cell biology note (33 chunks, so one search sees about an eighth of it), a course handbook full of codes (`T07`, `MAT1150`, `MPSH 2A`), and a physics formula sheet.
+`eval_routing` only checks which tool the model picks. `scripts/eval_answers.py` checks the answers themselves. It uploads three study notes from `data/eval/notes` the way a visitor would: as private notes under one session, alongside the shared notes, which compete in every search as they do live. Then it asks each of the 28 questions in `data/eval/cases.json` in a fresh chat. The notes are a 17,000-character cell biology note (33 chunks, so one search sees about an eighth of it), a course handbook full of codes (`T07`, `MAT1150`, `MPSH 2A`), a physics formula sheet, and a fictional course's lab handbook for the held-out cases (below).
 
-Each case lists regexes for the facts a right answer must contain. A case passes when the answer has all of them, or, for a question the notes don't cover, when the answer says so. There are four categories:
+Each case lists regexes for the facts a right answer must contain. A case passes when the answer has all of them and the turn's searches returned the note they come from, or, for a question the notes don't cover, when the answer says so. There are four categories:
 
 - `single_fact`: the answer is in one place.
 - `exact_term`: the question hinges on a code or symbol, which search by meaning can miss.
@@ -233,3 +235,11 @@ A run spends far more than the routing eval, so it uses `EVAL_GEMINI_API_KEY`, a
 - The exact-term misses are search, not `read_note`. In the second run, "When does tutorial group T07 meet?" failed: the model searched once and the handbook didn't come back. Searching for a bare code misses it: `"T07"` returns the architecture note, the pasta recipe and the biology note, and `"MPSH 2A"` only the physics sheet, while `"tutorial group T07"` finds the handbook. Whether a code question passes depends on how the model words its search, which keyword search would fix.
 
 **With keyword matching for codes** (see Retrieval), two runs: 20/20 both times. Code questions went from 6/7 and 5/7 to 7/7, and one search on the question now returns the right note for all 17 cases that have one (16 before, the miss being "MPSH 2A"). Whole-document questions stayed at 4/4 and the routing eval at 10/10.
+
+**Grounded, and on questions it wasn't tuned on** (2026-10-11). A review pointed out three weaknesses in that 20/20. Many cases ask textbook facts the model knows anyway (glycolysis nets 2 ATP), nothing checked that an answer came from the notes, and the prompt had been tuned on these same 20 questions. So:
+
+- **A pass now needs the note.** The answer must contain the facts, and the turn's searches must have returned the note they come from. An answer the model knew already doesn't count, and the case's line says "not grounded".
+- **Eight held-out cases** (split `held_out`), written after the prompt and never used to change it, about a fictional course, PHY-1107. Its lab handbook (`data/eval/notes/phy1107-lab-handbook.md`) holds conventions only it has, some unlike the textbook: g is taken as 10 m/s², a stopwatch reading is quoted ±0.2 s, reports are due 9 days after the session through a portal called Labwise. The model can't answer these from what it knows, and a textbook answer is wrong.
+- **LaTeX is read as the chat shows it.** The chat now renders formulas (see Rendering), so the scorer reads `$g = 10\text{ m/s}^2$` as "g = 10 m/s^2"; before, a correct answer written that way failed.
+
+Results with prompt `assistant_v4`: **28/28** (dev 20/20, held-out 8/8), every answer grounded, one search returning the right note for all 24 cases that have one. An earlier `assistant_v4` run that day scored 27/28; its one miss, `lab-g-value`, was a correct answer written in LaTeX, the scoring bug fixed since. A prompt asking for plain-text maths instead (`assistant_v5`) was tried and dropped: LaTeX still showed in two of seven physics answers, and in both of its runs the model answered the stopwatch question from general knowledge without searching, which the grounding rule failed. The page renders formulas instead.

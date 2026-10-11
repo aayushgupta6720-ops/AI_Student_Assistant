@@ -12,8 +12,10 @@ Google project, and the live demo keeps its 500 requests a day.
 
 Scores, per case:
   facts    how many of the case's facts (regexes) the answer contains; a
-           case passes when it has all of them, or for a not_in_notes case,
-           when the answer says the notes don't cover it
+           case passes when it has all of them and the turn's searches
+           returned the note they come from (an answer from the model's own
+           knowledge doesn't count), or for a not_in_notes case, when the
+           answer says the notes don't cover it
   search   whether one search_notes-style retrieval of the question returns
            the expected note, and how many of the facts its passages hold:
            what a single search can give the model to work with
@@ -62,6 +64,11 @@ class Case:
     question: str
     docs: list[str]
     facts: list[str]
+    # "dev": the cases the prompt was tuned against. "held_out": written after
+    # the prompt and never used to change it, about a fictional course whose
+    # conventions only its note has (g = 10 m/s², a ±0.2 s stopwatch), so the
+    # model can't answer them from what it already knows.
+    split: str = "dev"
 
 
 @dataclass
@@ -81,7 +88,7 @@ class Result:
             return False
         if self.case.category == "not_in_notes":
             return bool(REFUSAL.search(normalise(self.answer)))
-        return all(self.answer_hits)
+        return all(self.answer_hits) and bool(self.sourced)
 
     @property
     def sourced(self) -> bool | None:
@@ -93,8 +100,11 @@ def load_cases(path: Path = EVAL_DIR / "cases.json") -> list[Case]:
 
 
 def normalise(text: str) -> str:
-    """Drop Markdown emphasis and collapse whitespace, so "**Stroma**" or a
-    fact split across lines still matches."""
+    """Drop Markdown emphasis and LaTeX markup and collapse whitespace, so
+    "**Stroma**", "$g = 10\\text{ m/s}^2$" or a fact split across lines still
+    matches what a reader sees."""
+    text = re.sub(r"\\(?:text|mathrm|mathbf|operatorname)\{([^}]*)\}", r"\1", text)
+    text = re.sub(r"\\[,;:! ]|\$", " ", text)
     return re.sub(r"\s+", " ", re.sub(r"[*_`]", "", text))
 
 
@@ -161,7 +171,7 @@ def _ratio(flags: tuple[bool, ...]) -> str:
 
 def case_report(r: Result) -> str:
     c = r.case
-    line = f"{'PASS' if r.passed else 'FAIL'}  {c.id:<24} {c.category:<12}"
+    line = f"{'PASS' if r.passed else 'FAIL'}  {c.id:<26} {c.category:<12}{' held-out' if c.split == 'held_out' else ''}"
     if r.error:
         return f"{line} ERROR {r.error}"
     if c.docs:
@@ -174,6 +184,8 @@ def case_report(r: Result) -> str:
         missing = [f for f, ok in zip(c.facts, r.answer_hits) if not ok]
         if missing:
             lines.append(f"      missing: {', '.join(missing)}")
+        if c.docs and all(r.answer_hits) and not r.sourced:
+            lines.append("      right facts, but the turn never retrieved the note: not grounded")
         lines.append(f"      answer: {normalise(r.answer)[:300]}")
     return "\n".join(lines)
 
@@ -193,6 +205,10 @@ def summary(results: list[Result]) -> str:
             f"{_pct(facts):>8}{_ratio(tuple(r.search_hit for r in searched)) if searched else '-':>12}"
             f"{_pct(context):>14}"
         )
+    for split in ("dev", "held_out"):
+        group = [r for r in results if r.case.split == split]
+        if group:
+            lines.append(f"{split:<14}{sum(r.passed for r in group):>4}/{len(group):<3}")
     return "\n".join(lines)
 
 
