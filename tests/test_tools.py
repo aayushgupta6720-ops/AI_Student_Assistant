@@ -56,6 +56,47 @@ async def test_a_tool_result_that_cant_be_sent_to_the_model_becomes_an_error(res
     json.dumps(out.result, allow_nan=False)  # what goes into the history can be sent
 
 
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        ({"query": "x", "max_chars": 2_000_000}, "unknown argument(s) max_chars; this tool takes query, top_k"),
+        ({}, "missing required argument(s) query"),
+        ({"query": 3}, "query must be a string"),
+        ({"query": "x", "top_k": "five"}, "top_k must be an integer"),
+        ({"query": "x", "top_k": True}, "top_k must be an integer"),
+        ({"query": "x", "top_k": 2.5}, "top_k must be an integer"),
+        (["x"], "expected an object of named arguments"),
+    ],
+)
+async def test_arguments_outside_the_schema_never_reach_the_handler(args, message):
+    # The model's arguments used to go straight into the handler, so a
+    # parameter the schema never offered was still the model's to set.
+    calls = []
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}},
+        "required": ["query"],
+    }
+    reg = ToolRegistry()
+    reg.register(Tool("search", "searches", schema, lambda **kw: calls.append(kw) or {"ok": True}))
+
+    out = await reg.execute("search", args)
+
+    assert out.is_error and out.result["error"] == f"invalid arguments: {message}"
+    assert calls == []
+
+
+async def test_whole_floats_count_as_integers():
+    # Gemini sends integer arguments as 3.0.
+    reg = ToolRegistry()
+    schema = {"type": "object", "properties": {"top_k": {"type": "integer"}}}
+    reg.register(Tool("search", "searches", schema, lambda top_k: {"top_k": top_k}))
+
+    out = await reg.execute("search", {"top_k": 3.0})
+
+    assert not out.is_error and out.result == {"top_k": 3.0}
+
+
 async def test_registry_specs_and_errors():
     reg = ToolRegistry()
     reg.register(Tool("boom", "explodes", {"type": "object", "properties": {}}, lambda: 1 / 0))
